@@ -241,7 +241,9 @@ class EPGManager {
 
             await this.processEPGInChunks(xmlData);
         } catch (error) {
-            console.error(`❌ Errore EPG: ${error.message}`);
+            const msg = (error && error.message) || (typeof error === 'string' ? error : String(error)) || 'Errore sconosciuto';
+            console.error('❌ Errore EPG:', msg);
+            if (error && error.stack) console.error(error.stack);
         }
     }
 
@@ -315,9 +317,15 @@ class EPGManager {
                     continue;
                 }
 
-                const title = program.title?.[0]?._ || program.title?.[0]?.$?.text || program.title?.[0] || 'Nessun Titolo';
-                const description = program.desc?.[0]?._ || program.desc?.[0]?.$?.text || program.desc?.[0] || '';
-                const category = program.category?.[0]?._ || program.category?.[0]?.$?.text || program.category?.[0] || '';
+                let title = program.title?.[0]?._ ?? program.title?.[0]?.$?.text ?? program.title?.[0];
+                let description = program.desc?.[0]?._ ?? program.desc?.[0]?.$?.text ?? program.desc?.[0];
+                let category = program.category?.[0]?._ ?? program.category?.[0]?.$?.text ?? program.category?.[0];
+                title = (title != null && typeof title === 'object') ? (title.text || title._ || String(title)) : (title ?? 'Nessun Titolo');
+                description = (description != null && typeof description === 'object') ? (description.text || description._ || String(description)) : (description ?? '');
+                category = (category != null && typeof category === 'object') ? (category.text || category._ || String(category)) : (category ?? '');
+                title = String(title);
+                description = String(description);
+                category = String(category);
 
                 stmt.run([
                     channelId,
