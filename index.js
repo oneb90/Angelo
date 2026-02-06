@@ -343,7 +343,95 @@ app.get('/:config/manifest.json', async (req, res) => {
     }
 });
 
-// Manteniamo la route esistente per gli altri endpoint
+// Route con config in path DEVONO stare prima della route generica :resource/:type/:id
+// altrimenti Stremio che chiama /<base64>/catalog/... matcha la generica e usa req.query vuoto → 0 canali
+app.get('/:config/catalog/:type/:id/:extra?.json', async (req, res) => {
+    try {
+        const configString = Buffer.from(req.params.config, 'base64').toString();
+        const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
+        const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
+        const extra = req.params.extra ? safeParseExtra(req.params.extra) : {};
+
+        const result = await catalogHandler({
+            type: req.params.type,
+            id: req.params.id,
+            extra,
+            config: decodedConfig,
+            cacheManager,
+            epgManager,
+            pythonResolver,
+            pythonRunner
+        });
+
+        res.setHeader('Content-Type', 'application/json');
+        res.send(result);
+    } catch (error) {
+        console.error('Error handling catalog request:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+app.get('/:config/stream/:type/:id.json', async (req, res) => {
+    try {
+        const configString = Buffer.from(req.params.config, 'base64').toString();
+        const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
+        const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
+
+        const result = await streamHandler({
+            type: req.params.type,
+            id: req.params.id,
+            config: decodedConfig,
+            cacheManager,
+            epgManager,
+            pythonResolver,
+            pythonRunner
+        });
+
+        res.setHeader('Content-Type', 'application/json');
+        res.send(result);
+    } catch (error) {
+        console.error('Error handling stream request:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+app.get('/:config/meta/:type/:id.json', async (req, res) => {
+    try {
+        const configString = Buffer.from(req.params.config, 'base64').toString();
+        const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
+        const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
+
+        const result = await metaHandler({
+            type: req.params.type,
+            id: req.params.id,
+            config: decodedConfig,
+            cacheManager,
+            epgManager,
+            pythonResolver,
+            pythonRunner
+        });
+
+        res.setHeader('Content-Type', 'application/json');
+        res.send(result);
+    } catch (error) {
+        console.error('Error handling meta request:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Route generica per catalog/stream/meta (solo URL senza config in path, es. ?m3u=...)
 app.get('/:resource/:type/:id/:extra?.json', async (req, res, next) => {
     const { resource, type, id } = req.params;
     const extra = req.params.extra
@@ -476,95 +564,6 @@ function safeParseExtra(extraParam) {
         return {};
     }
 }
-
-// Per il catalog con config codificato
-app.get('/:config/catalog/:type/:id/:extra?.json', async (req, res) => {
-    try {
-        const configString = Buffer.from(req.params.config, 'base64').toString();
-        const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
-        const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
-        const sessionKey = cacheManager.sessionKey;
-        const epgManager = await getEPGManager(sessionKey);
-        const pythonResolver = getPythonResolver(sessionKey);
-        const pythonRunner = getPythonRunner(sessionKey);
-        const extra = req.params.extra ? safeParseExtra(req.params.extra) : {};
-
-        const result = await catalogHandler({
-            type: req.params.type,
-            id: req.params.id,
-            extra,
-            config: decodedConfig,
-            cacheManager,
-            epgManager,
-            pythonResolver,
-            pythonRunner
-        });
-
-        res.setHeader('Content-Type', 'application/json');
-        res.send(result);
-    } catch (error) {
-        console.error('Error handling catalog request:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// Per lo stream con config codificato
-app.get('/:config/stream/:type/:id.json', async (req, res) => {
-    try {
-        const configString = Buffer.from(req.params.config, 'base64').toString();
-        const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
-        const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
-        const sessionKey = cacheManager.sessionKey;
-        const epgManager = await getEPGManager(sessionKey);
-        const pythonResolver = getPythonResolver(sessionKey);
-        const pythonRunner = getPythonRunner(sessionKey);
-
-        const result = await streamHandler({
-            type: req.params.type,
-            id: req.params.id,
-            config: decodedConfig,
-            cacheManager,
-            epgManager,
-            pythonResolver,
-            pythonRunner
-        });
-
-        res.setHeader('Content-Type', 'application/json');
-        res.send(result);
-    } catch (error) {
-        console.error('Error handling stream request:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// Per il meta con config codificato
-app.get('/:config/meta/:type/:id.json', async (req, res) => {
-    try {
-        const configString = Buffer.from(req.params.config, 'base64').toString();
-        const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
-        const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
-        const sessionKey = cacheManager.sessionKey;
-        const epgManager = await getEPGManager(sessionKey);
-        const pythonResolver = getPythonResolver(sessionKey);
-        const pythonRunner = getPythonRunner(sessionKey);
-
-        const result = await metaHandler({
-            type: req.params.type,
-            id: req.params.id,
-            config: decodedConfig,
-            cacheManager,
-            epgManager,
-            pythonResolver,
-            pythonRunner
-        });
-
-        res.setHeader('Content-Type', 'application/json');
-        res.send(result);
-    } catch (error) {
-        console.error('Error handling meta request:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
 
 // Route per servire il file M3U generato (opzionale session_key in query per sessione)
 app.get('/generated-m3u', (req, res) => {
