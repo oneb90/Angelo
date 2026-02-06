@@ -3,18 +3,25 @@ const PlaylistTransformer = require('./playlist-transformer');
 const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+
+function safeSessionDbName(sessionId) {
+    if (!sessionId || typeof sessionId !== 'string') return 'cache.db';
+    const hash = crypto.createHash('sha256').update(sessionId.trim()).digest('hex').slice(0, 16);
+    return `cache_${hash}.db`;
+}
 
 class CacheManager extends EventEmitter {
-    constructor() {
+    constructor(sessionId) {
         super();
+        this.sessionId = sessionId || null;
         this.transformer = new PlaylistTransformer();
         this.config = null;
         this.cache = null;
         this.pollingInterval = null;
         this.lastFilter = null;
         this.db = null;
-        this.dbPath = path.join(__dirname, 'data', 'cache.db');
-        // Database initialization and loading moved to module exports
+        this.dbPath = path.join(__dirname, 'data', safeSessionDbName(sessionId));
     }
 
     async initializeDatabase() {
@@ -422,8 +429,8 @@ class CacheManager extends EventEmitter {
     }
 }
 
-module.exports = async (config) => {
-    const instance = new CacheManager();
+module.exports = async (config, sessionId) => {
+    const instance = new CacheManager(sessionId);
     await instance.initializeDatabase();
     instance.loadCacheFromDB();
     instance.config = config;

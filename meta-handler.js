@@ -58,7 +58,8 @@ function enrichWithDetailedEPG(meta, channelId, userConfig) {
     return meta;
 }
 
-async function metaHandler({ type, id, config: userConfig }) {
+async function metaHandler({ type, id, config: userConfig, cacheManager: cm }) {
+    const cacheManager = cm || global.CacheManager;
     try {
 
         if (!userConfig.m3u) {
@@ -66,15 +67,15 @@ async function metaHandler({ type, id, config: userConfig }) {
             return { meta: null };
         }
 
-        if (global.CacheManager.cache.m3uUrl !== userConfig.m3u) {
+        if (cacheManager.cache.m3uUrl !== userConfig.m3u) {
             console.log('Cache M3U non aggiornata, ricostruzione...');
-            await global.CacheManager.rebuildCache(userConfig.m3u, userConfig);
+            await cacheManager.rebuildCache(userConfig.m3u, userConfig);
         }
 
         const channelId = id.split('|')[1];
 
         // Usa direttamente getChannel dalla cache, che ora gestisce correttamente i suffissi
-        const channel = global.CacheManager.getChannel(channelId);
+        const channel = cacheManager.getChannel(channelId);
 
         if (!channel) {
             console.log('=== Fine Meta Handler ===\n');

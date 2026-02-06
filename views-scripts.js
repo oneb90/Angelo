@@ -28,6 +28,52 @@ const getViewScripts = (protocol, host) => {
             toggle.textContent = content.classList.contains('show') ? '▲' : '▼';
         }
 
+        // Proteggi accesso alla home
+        (function initHomeAuth() {
+            const cb = document.getElementById('homeAuthEnabled');
+            const fields = document.getElementById('homeAuthFields');
+            if (!cb || !fields) return;
+            fetch('/api/home-auth/status').then(r => r.json()).then(function(data) {
+                cb.checked = data.enabled;
+                fields.style.display = data.enabled ? 'block' : 'none';
+            }).catch(function() {});
+            cb.addEventListener('change', function() { fields.style.display = cb.checked ? 'block' : 'none'; });
+        })();
+        function saveHomeAuth() {
+            const enabled = document.getElementById('homeAuthEnabled').checked;
+            const password = document.getElementById('homeAuthPassword').value;
+            const confirm = document.getElementById('homeAuthConfirm').value;
+            const msg = document.getElementById('homeAuthMessage');
+            if (enabled && password !== confirm) {
+                msg.textContent = 'Le password non coincidono';
+                msg.style.color = '#f44336';
+                return;
+            }
+            if (enabled && password.length < 1) {
+                msg.textContent = 'Inserisci una password';
+                msg.style.color = '#f44336';
+                return;
+            }
+            fetch('/api/home-auth/set', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ enabled: enabled, password: password, confirm: confirm })
+            }).then(function(r) { return r.json(); }).then(function(data) {
+                if (data.success) {
+                    msg.textContent = enabled ? 'Protezione attivata.' : 'Protezione disattivata.';
+                    msg.style.color = '#4CAF50';
+                    document.getElementById('homeAuthPassword').value = '';
+                    document.getElementById('homeAuthConfirm').value = '';
+                } else {
+                    msg.textContent = data.message || 'Errore';
+                    msg.style.color = '#f44336';
+                }
+            }).catch(function() {
+                msg.textContent = 'Errore di rete';
+                msg.style.color = '#f44336';
+            });
+        }
+
         // Funzioni per la gestione della configurazione
         function getConfigQueryString() {
             const form = document.getElementById('configForm');

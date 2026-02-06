@@ -47,7 +47,8 @@ function cleanNameForImage(name) {
     return cleaned || 'No Name';
 }
 
-async function catalogHandler({ type, id, extra, config: userConfig }) {
+async function catalogHandler({ type, id, extra, config: userConfig, cacheManager: cm }) {
+    const cacheManager = cm || global.CacheManager;
     try {
         if (!userConfig.m3u) {
             console.log('[Handlers] URL M3U mancante nella configurazione');
@@ -55,14 +56,14 @@ async function catalogHandler({ type, id, extra, config: userConfig }) {
         }
 
         // Aggiorna sempre la configurazione
-        await global.CacheManager.updateConfig(userConfig);
+        await cacheManager.updateConfig(userConfig);
 
         // Se l'EPG è abilitato, inizializzalo
         if (userConfig.epg_enabled === 'true') {
             const epgToUse = userConfig.epg ||
-                (global.CacheManager.cache.epgUrls &&
-                    global.CacheManager.cache.epgUrls.length > 0
-                    ? global.CacheManager.cache.epgUrls.join(',')
+                (cacheManager.cache.epgUrls &&
+                    cacheManager.cache.epgUrls.length > 0
+                    ? cacheManager.cache.epgUrls.join(',')
                     : null);
 
             if (epgToUse) {
@@ -82,20 +83,20 @@ async function catalogHandler({ type, id, extra, config: userConfig }) {
 
         // Se riceviamo un nuovo filtro (search o genre), lo salviamo
         if (search) {
-            global.CacheManager.setLastFilter('search', search);
+            cacheManager.setLastFilter('search', search);
         } else if (genre) {
-            global.CacheManager.setLastFilter('genre', genre);
+            cacheManager.setLastFilter('genre', genre);
         } else if (!skip) {
             // Se non c'è skip, significa che è una nuova richiesta senza filtri
-            global.CacheManager.clearLastFilter();
+            cacheManager.clearLastFilter();
         }
 
         skip = parseInt(skip) || 0;
         const ITEMS_PER_PAGE = 100;
 
         // Otteniamo i canali già filtrati
-        let filteredChannels = global.CacheManager.getFilteredChannels();
-        const cachedData = global.CacheManager.getCachedData();
+        let filteredChannels = cacheManager.getFilteredChannels();
+        const cachedData = cacheManager.getCachedData();
 
         const paginatedChannels = filteredChannels.slice(skip, skip + ITEMS_PER_PAGE);
 
@@ -187,7 +188,8 @@ function enrichWithEPG(meta, channelId, userConfig) {
     return meta;
 }
 
-async function streamHandler({ id, config: userConfig }) {
+async function streamHandler({ id, config: userConfig, cacheManager: cm }) {
+    const cacheManager = cm || global.CacheManager;
     try {
         if (!userConfig.m3u) {
             console.log('M3U URL mancante');
@@ -195,7 +197,7 @@ async function streamHandler({ id, config: userConfig }) {
         }
 
         // Aggiorna sempre la configurazione
-        await global.CacheManager.updateConfig(userConfig);
+        await cacheManager.updateConfig(userConfig);
 
         const channelId = id.split('|')[1];
 
@@ -213,7 +215,7 @@ async function streamHandler({ id, config: userConfig }) {
 
                 // Ricostruisci la cache
                 console.log('Ricostruzione cache con il nuovo file generato...');
-                await global.CacheManager.rebuildCache(userConfig.m3u, userConfig);
+                await cacheManager.rebuildCache(userConfig.m3u, userConfig);
 
                 return {
                     streams: [{
@@ -243,7 +245,7 @@ async function streamHandler({ id, config: userConfig }) {
         }
 
         // Continua con il normale flusso per gli altri canali
-        const channel = global.CacheManager.getChannel(channelId);
+        const channel = cacheManager.getChannel(channelId);
 
         if (!channel) {
             console.log('Canale non trovato:', channelId);

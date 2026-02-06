@@ -1,5 +1,6 @@
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const { addonBuilder } = require('stremio-addon-sdk');
 const PlaylistTransformer = require('./playlist-transformer');
 const { catalogHandler, streamHandler } = require('./handlers');
@@ -7,7 +8,8 @@ const metaHandler = require('./meta-handler');
 const EPGManager = require('./epg-manager');
 const config = require('./config');
 const CacheManagerFactory = require('./cache-manager');
-const { renderConfigPage } = require('./views');
+const { renderConfigPage, renderGatePage } = require('./views');
+const homeAuth = require('./home-auth');
 const PythonRunner = require('./python-runner');
 const ResolverStreamManager = require('./resolver-stream-manager')();
 const PythonResolver = require('./python-resolver');
@@ -17,16 +19,64 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
+
+// Registry cache per sessione (session_id opzionale nell'URL per accessi simultanei)
+const cacheRegistry = new Map();
+async function getCacheManager(sessionId, userConfig) {
+    const key = (sessionId && String(sessionId).trim()) ? String(sessionId).trim() : '_default';
+    if (!cacheRegistry.has(key)) {
+        cacheRegistry.set(key, await CacheManagerFactory(userConfig || {}, key === '_default' ? null : key));
+    }
+    const cm = cacheRegistry.get(key);
+    if (userConfig && Object.keys(userConfig).length) cm.updateConfig(userConfig);
+    return cm;
+}
+
+// API protezione home (prima del gate per permettere chiamate senza cookie)
+app.get('/api/home-auth/status', (req, res) => {
+    res.json(homeAuth.getState());
+});
+app.post('/api/home-auth/set', (req, res) => {
+    const { enabled, password, confirm } = req.body || {};
+    const result = homeAuth.setProtection(!!enabled, password);
+    res.json(result);
+});
+app.post('/api/home-auth/unlock', (req, res) => {
+    const password = (req.body && req.body.password) || '';
+    if (!homeAuth.verifyPassword(password)) {
+        return res.redirect('/?error=1');
+    }
+    const value = homeAuth.getUnlockCookieValue();
+    if (value) {
+        res.cookie(homeAuth.COOKIE_NAME, value, {
+            maxAge: homeAuth.COOKIE_MAX_AGE_MS,
+            httpOnly: true,
+            path: '/',
+            sameSite: 'lax'
+        });
+    }
+    res.redirect('/');
+});
 
 // Route principale - supporta sia il vecchio che il nuovo sistema
 app.get('/', async (req, res) => {
+    const state = homeAuth.getState();
+    if (state.enabled && !homeAuth.verifyUnlockCookie(req.cookies[homeAuth.COOKIE_NAME])) {
+        return res.send(renderGatePage(config.manifest));
+    }
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
     const host = req.headers['x-forwarded-host'] || req.get('host');
-    res.send(renderConfigPage(protocol, host, req.query, config.manifest));
+    const queryWithAuth = { ...req.query, homeAuthEnabled: state.enabled ? 'true' : 'false' };
+    res.send(renderConfigPage(protocol, host, queryWithAuth, config.manifest));
 });
 
 // Nuova route per la configurazione codificata
 app.get('/:config/configure', async (req, res) => {
+    const state = homeAuth.getState();
+    if (state.enabled && !homeAuth.verifyUnlockCookie(req.cookies[homeAuth.COOKIE_NAME])) {
+        return res.send(renderGatePage(config.manifest));
+    }
     try {
         const protocol = req.headers['x-forwarded-proto'] || req.protocol;
         const host = req.headers['x-forwarded-host'] || req.get('host');
@@ -50,7 +100,8 @@ app.get('/:config/configure', async (req, res) => {
             }
         }
 
-        res.send(renderConfigPage(protocol, host, decodedConfig, config.manifest));
+        const queryWithAuth = { ...decodedConfig, homeAuthEnabled: state.enabled ? 'true' : 'false' };
+        res.send(renderConfigPage(protocol, host, queryWithAuth, config.manifest));
     } catch (error) {
         console.error('Errore nella configurazione:', error);
         res.redirect('/');
@@ -60,17 +111,18 @@ app.get('/:config/configure', async (req, res) => {
 // Route per il manifest - supporta sia il vecchio che il nuovo sistema
 app.get('/manifest.json', async (req, res) => {
     try {
+        const cacheManager = await getCacheManager(req.query.session_id, req.query);
         const protocol = req.headers['x-forwarded-proto'] || req.protocol;
         const host = req.headers['x-forwarded-host'] || req.get('host');
         const configUrl = `${protocol}://${host}/?${new URLSearchParams(req.query)}`;
         if (req.query.resolver_update_interval) {
             configUrl += `&resolver_update_interval=${encodeURIComponent(req.query.resolver_update_interval)}`;
         }
-        if (req.query.m3u && global.CacheManager.cache.m3uUrl !== req.query.m3u) {
-            await global.CacheManager.rebuildCache(req.query.m3u);
+        if (req.query.m3u && cacheManager.cache.m3uUrl !== req.query.m3u) {
+            await cacheManager.rebuildCache(req.query.m3u, req.query);
         }
 
-        const { genres } = global.CacheManager.getCachedData();
+        const { genres } = cacheManager.getCachedData();
         const manifestConfig = {
             ...config.manifest,
             catalogs: [{
@@ -100,20 +152,19 @@ app.get('/manifest.json', async (req, res) => {
         const builder = new addonBuilder(manifestConfig);
 
         if (req.query.epg_enabled === 'true') {
-            // Se non è stato fornito manualmente un EPG URL, usa quello della playlist
             const epgToUse = req.query.epg ||
-                (global.CacheManager.getCachedData().epgUrls &&
-                    global.CacheManager.getCachedData().epgUrls.length > 0
-                    ? global.CacheManager.getCachedData().epgUrls.join(',')
+                (cacheManager.getCachedData().epgUrls &&
+                    cacheManager.getCachedData().epgUrls.length > 0
+                    ? cacheManager.getCachedData().epgUrls.join(',')
                     : null);
 
             if (epgToUse) {
                 await EPGManager.initializeEPG(epgToUse);
             }
         }
-        builder.defineCatalogHandler(async (args) => catalogHandler({ ...args, config: req.query }));
-        builder.defineStreamHandler(async (args) => streamHandler({ ...args, config: req.query }));
-        builder.defineMetaHandler(async (args) => metaHandler({ ...args, config: req.query }));
+        builder.defineCatalogHandler(async (args) => catalogHandler({ ...args, config: req.query, cacheManager }));
+        builder.defineStreamHandler(async (args) => streamHandler({ ...args, config: req.query, cacheManager }));
+        builder.defineMetaHandler(async (args) => metaHandler({ ...args, config: req.query, cacheManager }));
         res.setHeader('Content-Type', 'application/json');
         res.send(builder.getInterface().manifest);
     } catch (error) {
@@ -125,13 +176,15 @@ app.get('/manifest.json', async (req, res) => {
 // Nuova route per il manifest con configurazione codificata
 app.get('/:config/manifest.json', async (req, res) => {
     try {
-        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-        const host = req.headers['x-forwarded-host'] || req.get('host');
         const configString = Buffer.from(req.params.config, 'base64').toString();
         const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
+        const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
 
-        if (decodedConfig.m3u && global.CacheManager.cache.m3uUrl !== decodedConfig.m3u) {
-            await global.CacheManager.rebuildCache(decodedConfig.m3u);
+        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+        const host = req.headers['x-forwarded-host'] || req.get('host');
+
+        if (decodedConfig.m3u && cacheManager.cache.m3uUrl !== decodedConfig.m3u) {
+            await cacheManager.rebuildCache(decodedConfig.m3u, decodedConfig);
         }
         if (decodedConfig.resolver_script) {
             console.log('Inizializzazione Script Resolver dalla configurazione');
@@ -165,7 +218,7 @@ app.get('/:config/manifest.json', async (req, res) => {
             }
         }
 
-        const { genres } = global.CacheManager.getCachedData();
+        const { genres } = cacheManager.getCachedData();
         const manifestConfig = {
             ...config.manifest,
             catalogs: [{
@@ -196,11 +249,10 @@ app.get('/:config/manifest.json', async (req, res) => {
         const builder = new addonBuilder(manifestConfig);
 
         if (decodedConfig.epg_enabled === 'true') {
-            // Se non è stato fornito manualmente un EPG URL, usa quello della playlist
             const epgToUse = decodedConfig.epg ||
-                (global.CacheManager.getCachedData().epgUrls &&
-                    global.CacheManager.getCachedData().epgUrls.length > 0
-                    ? global.CacheManager.getCachedData().epgUrls.join(',')
+                (cacheManager.getCachedData().epgUrls &&
+                    cacheManager.getCachedData().epgUrls.length > 0
+                    ? cacheManager.getCachedData().epgUrls.join(',')
                     : null);
 
             if (epgToUse) {
@@ -208,9 +260,9 @@ app.get('/:config/manifest.json', async (req, res) => {
             }
         }
 
-        builder.defineCatalogHandler(async (args) => catalogHandler({ ...args, config: decodedConfig }));
-        builder.defineStreamHandler(async (args) => streamHandler({ ...args, config: decodedConfig }));
-        builder.defineMetaHandler(async (args) => metaHandler({ ...args, config: decodedConfig }));
+        builder.defineCatalogHandler(async (args) => catalogHandler({ ...args, config: decodedConfig, cacheManager }));
+        builder.defineStreamHandler(async (args) => streamHandler({ ...args, config: decodedConfig, cacheManager }));
+        builder.defineMetaHandler(async (args) => metaHandler({ ...args, config: decodedConfig, cacheManager }));
 
         res.setHeader('Content-Type', 'application/json');
         res.send(builder.getInterface().manifest);
@@ -228,16 +280,17 @@ app.get('/:resource/:type/:id/:extra?.json', async (req, res, next) => {
         : {};
 
     try {
+        const cacheManager = await getCacheManager(req.query.session_id, req.query);
         let result;
         switch (resource) {
             case 'stream':
-                result = await streamHandler({ type, id, config: req.query });
+                result = await streamHandler({ type, id, config: req.query, cacheManager });
                 break;
             case 'catalog':
-                result = await catalogHandler({ type, id, extra, config: req.query });
+                result = await catalogHandler({ type, id, extra, config: req.query, cacheManager });
                 break;
             case 'meta':
-                result = await metaHandler({ type, id, config: req.query });
+                result = await metaHandler({ type, id, config: req.query, cacheManager });
                 break;
             default:
                 next();
@@ -354,6 +407,7 @@ app.get('/:config/catalog/:type/:id/:extra?.json', async (req, res) => {
     try {
         const configString = Buffer.from(req.params.config, 'base64').toString();
         const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
+        const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
         const extra = req.params.extra
             ? safeParseExtra(req.params.extra)
             : {};
@@ -362,7 +416,8 @@ app.get('/:config/catalog/:type/:id/:extra?.json', async (req, res) => {
             type: req.params.type,
             id: req.params.id,
             extra,
-            config: decodedConfig
+            config: decodedConfig,
+            cacheManager
         });
 
         res.setHeader('Content-Type', 'application/json');
@@ -378,11 +433,13 @@ app.get('/:config/stream/:type/:id.json', async (req, res) => {
     try {
         const configString = Buffer.from(req.params.config, 'base64').toString();
         const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
+        const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
 
         const result = await streamHandler({
             type: req.params.type,
             id: req.params.id,
-            config: decodedConfig
+            config: decodedConfig,
+            cacheManager
         });
 
         res.setHeader('Content-Type', 'application/json');
@@ -398,11 +455,13 @@ app.get('/:config/meta/:type/:id.json', async (req, res) => {
     try {
         const configString = Buffer.from(req.params.config, 'base64').toString();
         const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
+        const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
 
         const result = await metaHandler({
             type: req.params.type,
             id: req.params.id,
-            config: decodedConfig
+            config: decodedConfig,
+            cacheManager
         });
 
         res.setHeader('Content-Type', 'application/json');
@@ -489,14 +548,15 @@ app.post('/api/rebuild-cache', async (req, res) => {
             return res.status(400).json({ success: false, message: 'URL M3U richiesto' });
         }
 
+        const cacheManager = await getCacheManager(req.body.session_id, req.body);
         console.log('🔄 Richiesta di ricostruzione cache ricevuta');
-        await global.CacheManager.rebuildCache(req.body.m3u, req.body);
+        await cacheManager.rebuildCache(req.body.m3u, req.body);
 
         if (req.body.epg_enabled === 'true') {
             console.log('📡 Ricostruzione EPG in corso...');
             const epgToUse = req.body.epg ||
-                (global.CacheManager.getCachedData().epgUrls && global.CacheManager.getCachedData().epgUrls.length > 0
-                    ? global.CacheManager.getCachedData().epgUrls.join(',')
+                (cacheManager.getCachedData().epgUrls && cacheManager.getCachedData().epgUrls.length > 0
+                    ? cacheManager.getCachedData().epgUrls.join(',')
                     : null);
             if (epgToUse) {
                 await EPGManager.initializeEPG(epgToUse);
@@ -563,8 +623,8 @@ app.post('/api/python-script', async (req, res) => {
 async function startAddon() {
     cleanupTempFolder();
 
-    // Inizializza CacheManager
-    global.CacheManager = await CacheManagerFactory(config);
+    // Inizializza CacheManager di default (per compatibilità e python-runner)
+    global.CacheManager = await getCacheManager(null, config);
 
     try {
         const port = process.env.PORT || 10000;

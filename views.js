@@ -2,6 +2,44 @@ const fs = require('fs');
 const path = require('path');
 const { getViewScripts } = require('./views-scripts');
 
+function renderGatePage(manifest) {
+    return `
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>${manifest.name} - Accesso</title>
+    <style>
+        body { margin: 0; padding: 0; height: 100vh; font-family: Arial, sans-serif; color: #fff; background: #2d1b4e; display: flex; justify-content: center; align-items: center; }
+        .gate-box { background: rgba(0,0,0,0.5); padding: 40px; border-radius: 8px; max-width: 360px; width: 90%; text-align: center; }
+        .gate-box h1 { font-size: 20px; margin-bottom: 20px; }
+        .gate-box input[type="password"] { width: 100%; padding: 12px; margin-bottom: 15px; border-radius: 4px; border: 1px solid #666; background: #333; color: white; box-sizing: border-box; }
+        .gate-box button { background: #8A5AAB; color: white; border: none; padding: 12px 24px; border-radius: 4px; cursor: pointer; font-size: 16px; width: 100%; }
+        .gate-box .error { color: #f44336; margin-top: 10px; font-size: 14px; display: none; }
+    </style>
+</head>
+<body>
+    <div class="gate-box">
+        <h1>Accesso alla configurazione</h1>
+        <p style="color: #aaa; margin-bottom: 20px;">Inserisci la password per accedere alla home dell'addon.</p>
+        <form id="gateForm" method="post" action="/api/home-auth/unlock">
+            <input type="password" name="password" id="gatePassword" placeholder="Password" required autofocus>
+            <button type="submit">Accedi</button>
+        </form>
+        <p id="gateError" class="error"></p>
+    </div>
+    <script>
+        document.getElementById('gateForm').addEventListener('submit', function(e) {
+            var p = document.getElementById('gatePassword').value;
+            if (!p || p.trim() === '') { e.preventDefault(); document.getElementById('gateError').textContent = 'Inserisci la password'; document.getElementById('gateError').style.display = 'block'; return false; }
+        });
+        var err = new URLSearchParams(window.location.search).get('error');
+        if (err) { document.getElementById('gateError').textContent = 'Password non corretta'; document.getElementById('gateError').style.display = 'block'; }
+    </script>
+</body>
+</html>`;
+}
+
 const renderConfigPage = (protocol, host, query, manifest) => {
    // Verifica se il file addon-config.json esiste
    const configPath = path.join(__dirname, 'addon-config.json');
@@ -241,6 +279,20 @@ const renderConfigPage = (protocol, host, query, manifest) => {
                    <button onclick="installAddon()">INSTALLA SU STREMIO</button>
                </div>
                
+               <div class="config-form" id="homeAuthSection" style="margin-bottom: 20px;">
+                   <h2 style="margin-top: 0;">Proteggi accesso alla home</h2>
+                   <p style="color: #aaa; font-size: 14px;">Se attivi la protezione, alla prossima visita sarà richiesta una password per vedere questa pagina.</p>
+                   <label><input type="checkbox" id="homeAuthEnabled" ${query.homeAuthEnabled === 'true' ? 'checked' : ''}> Abilita protezione con password</label>
+                   <div id="homeAuthFields" style="margin-top: 10px; display: none;">
+                       <label>Password:</label>
+                       <input type="password" id="homeAuthPassword" placeholder="Nuova password">
+                       <label>Conferma password:</label>
+                       <input type="password" id="homeAuthConfirm" placeholder="Ripeti password">
+                       <button type="button" onclick="saveHomeAuth()" style="margin-top: 10px;">Salva protezione</button>
+                       <span id="homeAuthMessage" style="margin-left: 10px; font-size: 14px;"></span>
+                   </div>
+               </div>
+               
                <div class="config-form">
                    <h2>Genera Configurazione</h2>
                    <form id="configForm" onsubmit="updateConfig(event)">
@@ -267,6 +319,10 @@ const renderConfigPage = (protocol, host, query, manifest) => {
                            Abilita EPG
                        </label>
 
+                       <label>ID Sessione (opzionale):</label>
+                       <input type="text" name="session_id" value="${query.session_id || ''}" placeholder="Es. famiglia, ufficio - per accessi simultanei con config diverse">
+                       <small style="color: #999;">Se impostato, la cache sarà isolata per questa sessione.</small>
+                       
                        <label>Lingua Canali:</label>
                        <select name="language" style="width: 100%; padding: 8px; margin-bottom: 10px; border-radius: 4px; border: 1px solid #666; background: #333; color: white;">
                            <option value="Italiano" ${(query.language || 'Italiano') === 'Italiano' ? 'selected' : ''}>Italiano</option>
@@ -494,5 +550,6 @@ const renderConfigPage = (protocol, host, query, manifest) => {
 };
 
 module.exports = {
-    renderConfigPage
+    renderConfigPage,
+    renderGatePage
 };
