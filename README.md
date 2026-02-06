@@ -28,7 +28,9 @@ Un caffè ☕ o una birra sono 🍺 un gesto di riconoscenza molto apprezzato e 
 
 ### ✨ Nuove funzionalità
 - **🔒 Protezione password della home**: Opzione nella web UI per proteggere l’accesso alla pagina di configurazione con una password. Se attivata, chi apre la home (o il link «Configura» da Stremio) deve inserire la password; l’uso dell’addon da Stremio non richiede password.
-- **🔄 Sessioni e cache isolate**: La cache è isolata automaticamente per configurazione (stessa config = stessa cache). Più utenti o configurazioni diverse possono usare il server contemporaneamente senza sovrascrivere la cache.
+- **🔄 Sessioni e cache isolate**: La cache è isolata automaticamente per configurazione (stessa config = stessa cache). EPG, Resolver Python e Generatore playlist sono anch'essi per sessione. Più utenti o configurazioni diverse possono usare il server contemporaneamente senza sovrascrivere i dati.
+- **🆔 ID Sessione**: In home/config viene mostrato l'**ID Sessione** (derivato dalla configurazione) quando generi una configurazione. L'ID è incluso anche nel backup (export) e viene aggiornato in fase di ripristino (import).
+- **⏰ Scadenza sessioni (24h)**: Se una sessione non riceve richieste per **24 ore**, scade automaticamente: tutta la cache di quella sessione (cache M3U, EPG, resolver, generatore) viene eliminata. Alla successiva richiesta con la stessa config la sessione viene ricreata e i dati ripopolati dagli URL.
 
 ### 🔧 Miglioramenti
 - **🔒 UI protezione home**: Con protezione attiva si vede la spunta e il pulsante «Modifica password»; i campi password e conferma compaiono solo cliccando «Modifica password».
@@ -166,12 +168,12 @@ Clicca su un canale per vedere:
 
 ### 📤 Backup configurazione
 1. Clicca su **BACKUP CONFIGURAZIONE** 💾
-2. Un file JSON verrà scaricato con tutte le tue impostazioni
+2. Un file JSON verrà scaricato con tutte le tue impostazioni (incluso l'**ID Sessione** della config corrente)
 
 ### 📥 Ripristino configurazione
 1. Clicca su **RIPRISTINA CONFIGURAZIONE** 📤
 2. Seleziona il file JSON precedentemente salvato
-3. Attendi il completamento del ripristino
+3. Attendi il completamento del ripristino (l'ID Sessione in pagina si aggiorna in base alla config ripristinata)
 
 ## ❓ Risoluzione problemi
 
@@ -215,6 +217,8 @@ Clicca su un canale per vedere:
 - ✅ Backup e ripristino configurazione
 - ✅ Protezione password della pagina di configurazione (opzionale)
 - ✅ Cache isolata per configurazione (accessi simultanei)
+- ✅ ID Sessione visibile e incluso in export/import
+- ✅ Scadenza automatica sessioni inattive (24h) per liberare spazio
 - Specifiche tecniche nel [wiki](https://github.com/mccoy88f/OMG-Premium-TV/wiki/Tech-Spec-%E2%80%90-Specifiche-Teniche)
 
 ## 📱 Compatibilità

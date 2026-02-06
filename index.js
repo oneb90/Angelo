@@ -5,14 +5,22 @@ const { addonBuilder } = require('stremio-addon-sdk');
 const PlaylistTransformer = require('./playlist-transformer');
 const { catalogHandler, streamHandler } = require('./handlers');
 const metaHandler = require('./meta-handler');
-const EPGManager = require('./epg-manager');
+const EPGManagerModule = require('./epg-manager');
+const getEPGManager = EPGManagerModule.getEPGManager;
+const removeEPGSession = EPGManagerModule.removeEPGSession;
 const config = require('./config');
 const CacheManagerFactory = require('./cache-manager');
 const { renderConfigPage, renderGatePage } = require('./views');
 const homeAuth = require('./home-auth');
-const PythonRunner = require('./python-runner');
+const PythonRunnerModule = require('./python-runner');
+const PythonRunner = PythonRunnerModule;
+const getPythonRunner = PythonRunnerModule.getPythonRunner;
+const removeRunnerSession = PythonRunnerModule.removeRunnerSession;
 const ResolverStreamManager = require('./resolver-stream-manager')();
-const PythonResolver = require('./python-resolver');
+const PythonResolverModule = require('./python-resolver');
+const PythonResolver = PythonResolverModule;
+const getPythonResolver = PythonResolverModule.getPythonResolver;
+const removeResolverSession = PythonResolverModule.removeResolverSession;
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
@@ -34,15 +42,78 @@ function getSessionKeyFromConfig(userConfig) {
 
 // Registry cache per sessione (chiave derivata dalla config)
 const cacheRegistry = new Map();
+
+// Ultima attività per sessione (solo non-default). Scadenza 24h.
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const sessionLastActivity = new Map();
+
+function touchSession(sessionKey) {
+    if (sessionKey && sessionKey !== '_default') {
+        sessionLastActivity.set(sessionKey, Date.now());
+    }
+}
+
 async function getCacheManager(sessionId, userConfig) {
     const key = (sessionId && String(sessionId).trim()) ? String(sessionId).trim() : getSessionKeyFromConfig(userConfig);
     if (!cacheRegistry.has(key)) {
         cacheRegistry.set(key, await CacheManagerFactory(userConfig || {}, key === '_default' ? null : key));
     }
     const cm = cacheRegistry.get(key);
+    cm.sessionKey = key;
     if (userConfig && Object.keys(userConfig).length) cm.updateConfig(userConfig);
+    touchSession(key);
     return cm;
 }
+
+/**
+ * Elimina una sessione scaduta (cache, EPG, resolver, runner) e rimuove dai registry.
+ * Non usare per _default.
+ */
+function expireSession(sessionKey) {
+    if (sessionKey === '_default') return;
+    const cm = cacheRegistry.get(sessionKey);
+    if (cm) {
+        cm.destroy();
+        cacheRegistry.delete(sessionKey);
+    }
+    removeEPGSession(sessionKey);
+    removeResolverSession(sessionKey);
+    removeRunnerSession(sessionKey);
+    sessionLastActivity.delete(sessionKey);
+    console.log('⏰ Sessione scaduta e rimossa:', sessionKey);
+}
+
+/** Controlla sessioni inattive da più di 24h e le rimuove. */
+function cleanupExpiredSessions() {
+    const now = Date.now();
+    const toExpire = new Set();
+    for (const [key, last] of sessionLastActivity) {
+        if (now - last >= SESSION_TTL_MS) toExpire.add(key);
+    }
+    // Anche sessioni in cache ma senza lastActivity (es. create prima del touch)
+    for (const key of cacheRegistry.keys()) {
+        if (key === '_default') continue;
+        const last = sessionLastActivity.get(key);
+        if (last === undefined || now - last >= SESSION_TTL_MS) toExpire.add(key);
+    }
+    toExpire.forEach(key => {
+        try {
+            expireSession(key);
+        } catch (e) {
+            console.error('Errore scadenza sessione', key, e.message);
+        }
+    });
+}
+
+// API per ottenere l'ID sessione dalla config (per UI e export)
+app.post('/api/session-key', (req, res) => {
+    try {
+        const sessionKey = getSessionKeyFromConfig(req.body || {});
+        res.json({ sessionKey });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    }
+});
 
 // API protezione home (prima del gate per permettere chiamate senza cookie)
 app.get('/api/home-auth/status', (req, res) => {
@@ -100,15 +171,15 @@ app.get('/:config/configure', async (req, res) => {
 
         // Inizializza il generatore Python se configurato
         if (decodedConfig.python_script_url) {
+            const sessionKey = getSessionKeyFromConfig(decodedConfig);
+            const cacheManagerForConfig = await getCacheManager(decodedConfig.session_id, decodedConfig);
+            const pythonRunnerForSession = getPythonRunner(sessionKey);
             console.log('Inizializzazione Script Python Generatore dalla configurazione');
             try {
-                // Scarica lo script Python se non già scaricato
-                await PythonRunner.downloadScript(decodedConfig.python_script_url);
-
-                // Se è stato definito un intervallo di aggiornamento, impostalo
+                await pythonRunnerForSession.downloadScript(decodedConfig.python_script_url);
                 if (decodedConfig.python_update_interval) {
                     console.log('Impostazione dell\'aggiornamento automatico del generatore Python');
-                    PythonRunner.scheduleUpdate(decodedConfig.python_update_interval);
+                    pythonRunnerForSession.scheduleUpdate(decodedConfig.python_update_interval, cacheManagerForConfig);
                 }
             } catch (pythonError) {
                 console.error('Errore nell\'inizializzazione dello script Python:', pythonError);
@@ -116,7 +187,8 @@ app.get('/:config/configure', async (req, res) => {
         }
 
         const queryWithAuth = { ...decodedConfig, homeAuthEnabled: state.enabled ? 'true' : 'false' };
-        res.send(renderConfigPage(protocol, host, queryWithAuth, config.manifest));
+        const sessionKey = getSessionKeyFromConfig(decodedConfig);
+        res.send(renderConfigPage(protocol, host, queryWithAuth, config.manifest, sessionKey));
     } catch (error) {
         console.error('Errore nella configurazione:', error);
         res.redirect('/');
@@ -127,6 +199,11 @@ app.get('/:config/configure', async (req, res) => {
 app.get('/manifest.json', async (req, res) => {
     try {
         const cacheManager = await getCacheManager(req.query.session_id, req.query);
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
+
         const protocol = req.headers['x-forwarded-proto'] || req.protocol;
         const host = req.headers['x-forwarded-host'] || req.get('host');
         const configUrl = `${protocol}://${host}/?${new URLSearchParams(req.query)}`;
@@ -143,19 +220,9 @@ app.get('/manifest.json', async (req, res) => {
             catalogs: [{
                 ...config.manifest.catalogs[0],
                 extra: [
-                    {
-                        name: 'genre',
-                        isRequired: false,
-                        options: genres
-                    },
-                    {
-                        name: 'search',
-                        isRequired: false
-                    },
-                    {
-                        name: 'skip',
-                        isRequired: false
-                    }
+                    { name: 'genre', isRequired: false, options: genres },
+                    { name: 'search', isRequired: false },
+                    { name: 'skip', isRequired: false }
                 ]
             }],
             behaviorHints: {
@@ -168,18 +235,14 @@ app.get('/manifest.json', async (req, res) => {
 
         if (req.query.epg_enabled === 'true') {
             const epgToUse = req.query.epg ||
-                (cacheManager.getCachedData().epgUrls &&
-                    cacheManager.getCachedData().epgUrls.length > 0
-                    ? cacheManager.getCachedData().epgUrls.join(',')
-                    : null);
-
-            if (epgToUse) {
-                await EPGManager.initializeEPG(epgToUse);
-            }
+                (cacheManager.getCachedData().epgUrls && cacheManager.getCachedData().epgUrls.length > 0
+                    ? cacheManager.getCachedData().epgUrls.join(',') : null);
+            if (epgToUse) await epgManager.initializeEPG(epgToUse);
         }
-        builder.defineCatalogHandler(async (args) => catalogHandler({ ...args, config: req.query, cacheManager }));
-        builder.defineStreamHandler(async (args) => streamHandler({ ...args, config: req.query, cacheManager }));
-        builder.defineMetaHandler(async (args) => metaHandler({ ...args, config: req.query, cacheManager }));
+
+        builder.defineCatalogHandler(async (args) => catalogHandler({ ...args, config: req.query, cacheManager, epgManager, pythonResolver, pythonRunner }));
+        builder.defineStreamHandler(async (args) => streamHandler({ ...args, config: req.query, cacheManager, epgManager, pythonResolver, pythonRunner }));
+        builder.defineMetaHandler(async (args) => metaHandler({ ...args, config: req.query, cacheManager, epgManager, pythonResolver, pythonRunner }));
         res.setHeader('Content-Type', 'application/json');
         res.send(builder.getInterface().manifest);
     } catch (error) {
@@ -201,32 +264,30 @@ app.get('/:config/manifest.json', async (req, res) => {
         if (decodedConfig.m3u && cacheManager.cache.m3uUrl !== decodedConfig.m3u) {
             await cacheManager.rebuildCache(decodedConfig.m3u, decodedConfig);
         }
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
+
         if (decodedConfig.resolver_script) {
             console.log('Inizializzazione Script Resolver dalla configurazione');
             try {
-                // Scarica lo script Resolver
-                const resolverDownloaded = await PythonResolver.downloadScript(decodedConfig.resolver_script);
-
-                // Se è stato definito un intervallo di aggiornamento, impostalo
+                await pythonResolver.downloadScript(decodedConfig.resolver_script);
                 if (decodedConfig.resolver_update_interval) {
                     console.log('Impostazione dell\'aggiornamento automatico del resolver');
-                    PythonResolver.scheduleUpdate(decodedConfig.resolver_update_interval);
+                    pythonResolver.scheduleUpdate(decodedConfig.resolver_update_interval);
                 }
             } catch (resolverError) {
                 console.error('Errore nell\'inizializzazione dello script Resolver:', resolverError);
             }
         }
-        // Inizializza il generatore Python se configurato
         if (decodedConfig.python_script_url) {
             console.log('Inizializzazione Script Python Generatore dalla configurazione');
             try {
-                // Scarica lo script Python se non già scaricato
-                await PythonRunner.downloadScript(decodedConfig.python_script_url);
-
-                // Se è stato definito un intervallo di aggiornamento, impostalo
+                await pythonRunner.downloadScript(decodedConfig.python_script_url);
                 if (decodedConfig.python_update_interval) {
                     console.log('Impostazione dell\'aggiornamento automatico del generatore Python');
-                    PythonRunner.scheduleUpdate(decodedConfig.python_update_interval);
+                    pythonRunner.scheduleUpdate(decodedConfig.python_update_interval, cacheManager);
                 }
             } catch (pythonError) {
                 console.error('Errore nell\'inizializzazione dello script Python:', pythonError);
@@ -265,19 +326,14 @@ app.get('/:config/manifest.json', async (req, res) => {
 
         if (decodedConfig.epg_enabled === 'true') {
             const epgToUse = decodedConfig.epg ||
-                (cacheManager.getCachedData().epgUrls &&
-                    cacheManager.getCachedData().epgUrls.length > 0
-                    ? cacheManager.getCachedData().epgUrls.join(',')
-                    : null);
-
-            if (epgToUse) {
-                await EPGManager.initializeEPG(epgToUse);
-            }
+                (cacheManager.getCachedData().epgUrls && cacheManager.getCachedData().epgUrls.length > 0
+                    ? cacheManager.getCachedData().epgUrls.join(',') : null);
+            if (epgToUse) await epgManager.initializeEPG(epgToUse);
         }
 
-        builder.defineCatalogHandler(async (args) => catalogHandler({ ...args, config: decodedConfig, cacheManager }));
-        builder.defineStreamHandler(async (args) => streamHandler({ ...args, config: decodedConfig, cacheManager }));
-        builder.defineMetaHandler(async (args) => metaHandler({ ...args, config: decodedConfig, cacheManager }));
+        builder.defineCatalogHandler(async (args) => catalogHandler({ ...args, config: decodedConfig, cacheManager, epgManager, pythonResolver, pythonRunner }));
+        builder.defineStreamHandler(async (args) => streamHandler({ ...args, config: decodedConfig, cacheManager, epgManager, pythonResolver, pythonRunner }));
+        builder.defineMetaHandler(async (args) => metaHandler({ ...args, config: decodedConfig, cacheManager, epgManager, pythonResolver, pythonRunner }));
 
         res.setHeader('Content-Type', 'application/json');
         res.send(builder.getInterface().manifest);
@@ -296,16 +352,20 @@ app.get('/:resource/:type/:id/:extra?.json', async (req, res, next) => {
 
     try {
         const cacheManager = await getCacheManager(req.query.session_id, req.query);
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
         let result;
         switch (resource) {
             case 'stream':
-                result = await streamHandler({ type, id, config: req.query, cacheManager });
+                result = await streamHandler({ type, id, config: req.query, cacheManager, epgManager, pythonResolver, pythonRunner });
                 break;
             case 'catalog':
-                result = await catalogHandler({ type, id, extra, config: req.query, cacheManager });
+                result = await catalogHandler({ type, id, extra, config: req.query, cacheManager, epgManager, pythonResolver, pythonRunner });
                 break;
             case 'meta':
-                result = await metaHandler({ type, id, config: req.query, cacheManager });
+                result = await metaHandler({ type, id, config: req.query, cacheManager, epgManager, pythonResolver, pythonRunner });
                 break;
             default:
                 next();
@@ -423,16 +483,21 @@ app.get('/:config/catalog/:type/:id/:extra?.json', async (req, res) => {
         const configString = Buffer.from(req.params.config, 'base64').toString();
         const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
         const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
-        const extra = req.params.extra
-            ? safeParseExtra(req.params.extra)
-            : {};
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
+        const extra = req.params.extra ? safeParseExtra(req.params.extra) : {};
 
         const result = await catalogHandler({
             type: req.params.type,
             id: req.params.id,
             extra,
             config: decodedConfig,
-            cacheManager
+            cacheManager,
+            epgManager,
+            pythonResolver,
+            pythonRunner
         });
 
         res.setHeader('Content-Type', 'application/json');
@@ -449,12 +514,19 @@ app.get('/:config/stream/:type/:id.json', async (req, res) => {
         const configString = Buffer.from(req.params.config, 'base64').toString();
         const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
         const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
 
         const result = await streamHandler({
             type: req.params.type,
             id: req.params.id,
             config: decodedConfig,
-            cacheManager
+            cacheManager,
+            epgManager,
+            pythonResolver,
+            pythonRunner
         });
 
         res.setHeader('Content-Type', 'application/json');
@@ -471,12 +543,19 @@ app.get('/:config/meta/:type/:id.json', async (req, res) => {
         const configString = Buffer.from(req.params.config, 'base64').toString();
         const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
         const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
 
         const result = await metaHandler({
             type: req.params.type,
             id: req.params.id,
             config: decodedConfig,
-            cacheManager
+            cacheManager,
+            epgManager,
+            pythonResolver,
+            pythonRunner
         });
 
         res.setHeader('Content-Type', 'application/json');
@@ -487,9 +566,12 @@ app.get('/:config/meta/:type/:id.json', async (req, res) => {
     }
 });
 
-// Route per servire il file M3U generato
+// Route per servire il file M3U generato (opzionale session_key in query per sessione)
 app.get('/generated-m3u', (req, res) => {
-    const m3uContent = PythonRunner.getM3UContent();
+    const sessionKey = req.query.session_key || '_default';
+    touchSession(sessionKey);
+    const runner = getPythonRunner(sessionKey);
+    const m3uContent = runner.getM3UContent();
     if (m3uContent) {
         res.setHeader('Content-Type', 'text/plain');
         res.send(m3uContent);
@@ -500,49 +582,52 @@ app.get('/generated-m3u', (req, res) => {
 
 app.post('/api/resolver', async (req, res) => {
     const { action, url, interval } = req.body;
+    const sessionKey = getSessionKeyFromConfig(req.body);
+    touchSession(sessionKey);
+    const resolver = getPythonResolver(sessionKey);
 
     try {
         if (action === 'download' && url) {
-            const success = await PythonResolver.downloadScript(url);
+            const success = await resolver.downloadScript(url);
             if (success) {
                 res.json({ success: true, message: 'Script resolver scaricato con successo' });
             } else {
-                res.status(500).json({ success: false, message: PythonResolver.getStatus().lastError });
+                res.status(500).json({ success: false, message: resolver.getStatus().lastError });
             }
         } else if (action === 'create-template') {
-            const success = await PythonResolver.createScriptTemplate();
+            const success = await resolver.createScriptTemplate();
             if (success) {
                 res.json({
                     success: true,
                     message: 'Template script resolver creato con successo',
-                    scriptPath: PythonResolver.scriptPath
+                    scriptPath: resolver.scriptPath
                 });
             } else {
-                res.status(500).json({ success: false, message: PythonResolver.getStatus().lastError });
+                res.status(500).json({ success: false, message: resolver.getStatus().lastError });
             }
         } else if (action === 'check-health') {
-            const isHealthy = await PythonResolver.checkScriptHealth();
+            const isHealthy = await resolver.checkScriptHealth();
             res.json({
                 success: isHealthy,
-                message: isHealthy ? 'Script resolver valido' : PythonResolver.getStatus().lastError
+                message: isHealthy ? 'Script resolver valido' : resolver.getStatus().lastError
             });
         } else if (action === 'status') {
-            res.json(PythonResolver.getStatus());
+            res.json(resolver.getStatus());
         } else if (action === 'clear-cache') {
-            PythonResolver.clearCache();
+            resolver.clearCache();
             res.json({ success: true, message: 'Cache resolver svuotata' });
         } else if (action === 'schedule' && interval) {
-            const success = PythonResolver.scheduleUpdate(interval);
+            const success = resolver.scheduleUpdate(interval);
             if (success) {
                 res.json({
                     success: true,
                     message: `Aggiornamento automatico impostato ogni ${interval}`
                 });
             } else {
-                res.status(500).json({ success: false, message: PythonResolver.getStatus().lastError });
+                res.status(500).json({ success: false, message: resolver.getStatus().lastError });
             }
         } else if (action === 'stopSchedule') {
-            const stopped = PythonResolver.stopScheduledUpdates();
+            const stopped = resolver.stopScheduledUpdates();
             res.json({
                 success: true,
                 message: stopped ? 'Aggiornamento automatico fermato' : 'Nessun aggiornamento pianificato da fermare'
@@ -569,12 +654,13 @@ app.post('/api/rebuild-cache', async (req, res) => {
 
         if (req.body.epg_enabled === 'true') {
             console.log('📡 Ricostruzione EPG in corso...');
+            const epgManager = await getEPGManager(cacheManager.sessionKey);
             const epgToUse = req.body.epg ||
                 (cacheManager.getCachedData().epgUrls && cacheManager.getCachedData().epgUrls.length > 0
                     ? cacheManager.getCachedData().epgUrls.join(',')
                     : null);
             if (epgToUse) {
-                await EPGManager.initializeEPG(epgToUse);
+                await epgManager.initializeEPG(epgToUse);
             }
         }
 
@@ -586,43 +672,52 @@ app.post('/api/rebuild-cache', async (req, res) => {
     }
 });
 
-// Endpoint API per le operazioni sullo script Python
+// Endpoint API per le operazioni sullo script Python (sessione da body)
 app.post('/api/python-script', async (req, res) => {
     const { action, url, interval } = req.body;
+    const sessionKey = getSessionKeyFromConfig(req.body);
+    touchSession(sessionKey);
+    const runner = getPythonRunner(sessionKey);
+    const cacheManager = await getCacheManager(req.body?.session_id, req.body || {});
 
     try {
         if (action === 'download' && url) {
-            const success = await PythonRunner.downloadScript(url);
+            const success = await runner.downloadScript(url);
             if (success) {
                 res.json({ success: true, message: 'Script scaricato con successo' });
             } else {
-                res.status(500).json({ success: false, message: PythonRunner.getStatus().lastError });
+                res.status(500).json({ success: false, message: runner.getStatus().lastError });
             }
         } else if (action === 'execute') {
-            const success = await PythonRunner.executeScript();
+            const success = await runner.executeScript();
             if (success) {
+                const m3uUrl = `${req.protocol}://${req.get('host')}/generated-m3u` + (sessionKey !== '_default' ? `?session_key=${encodeURIComponent(sessionKey)}` : '');
                 res.json({
                     success: true,
                     message: 'Script eseguito con successo',
-                    m3uUrl: `${req.protocol}://${req.get('host')}/generated-m3u`
+                    m3uUrl
                 });
             } else {
-                res.status(500).json({ success: false, message: PythonRunner.getStatus().lastError });
+                res.status(500).json({ success: false, message: runner.getStatus().lastError });
             }
         } else if (action === 'status') {
-            res.json(PythonRunner.getStatus());
+            const status = runner.getStatus();
+            if (status.m3uExists) {
+                status.m3uUrl = `${req.protocol}://${req.get('host')}/generated-m3u` + (sessionKey !== '_default' ? `?session_key=${encodeURIComponent(sessionKey)}` : '');
+            }
+            res.json(status);
         } else if (action === 'schedule' && interval) {
-            const success = PythonRunner.scheduleUpdate(interval);
+            const success = runner.scheduleUpdate(interval, cacheManager);
             if (success) {
                 res.json({
                     success: true,
                     message: `Aggiornamento automatico impostato ogni ${interval}`
                 });
             } else {
-                res.status(500).json({ success: false, message: PythonRunner.getStatus().lastError });
+                res.status(500).json({ success: false, message: runner.getStatus().lastError });
             }
         } else if (action === 'stopSchedule') {
-            const stopped = PythonRunner.stopScheduledUpdates();
+            const stopped = runner.stopScheduledUpdates();
             res.json({
                 success: true,
                 message: stopped ? 'Aggiornamento automatico fermato' : 'Nessun aggiornamento pianificato da fermare'
@@ -640,6 +735,10 @@ async function startAddon() {
 
     // Inizializza CacheManager di default (per compatibilità e python-runner)
     global.CacheManager = await getCacheManager(null, config);
+
+    // Timer scadenza sessioni: ogni 15 minuti controlla e rimuove sessioni inattive da 24h
+    setInterval(cleanupExpiredSessions, 15 * 60 * 1000);
+    console.log('✓ Timer scadenza sessioni attivo (24h inattività, controllo ogni 15 min)');
 
     try {
         const port = process.env.PORT || 10000;

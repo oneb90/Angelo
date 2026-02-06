@@ -5,10 +5,18 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const execAsync = promisify(exec);
 const cron = require('node-cron');
+const crypto = require('crypto');
+
+function safeResolverScriptName(sessionKey) {
+    if (!sessionKey || sessionKey === '_default') return 'resolver_script.py';
+    const hash = crypto.createHash('sha256').update(String(sessionKey)).digest('hex').slice(0, 16);
+    return path.join(__dirname, 'temp', `resolver_${hash}.py`);
+}
 
 class PythonResolver {
-    constructor() {
-        this.scriptPath = path.join(__dirname, 'resolver_script.py');
+    constructor(sessionKey = null) {
+        this.sessionKey = sessionKey;
+        this.scriptPath = sessionKey ? safeResolverScriptName(sessionKey) : path.join(__dirname, 'resolver_script.py');
         this.resolvedLinksCache = new Map();
         this.cacheExpiryTime = 20 * 60 * 1000; // 20 minuti di cache per i link risolti
         this.lastExecution = null;
@@ -18,11 +26,9 @@ class PythonResolver {
         this.cronJob = null;
         this.updateInterval = null;
         this.pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
-        
-        // Crea la directory temp se non esiste
-        if (!fs.existsSync(path.join(__dirname, 'temp'))) {
-            fs.mkdirSync(path.join(__dirname, 'temp'));
-        }
+
+        const tempDir = path.join(__dirname, 'temp');
+        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
     }
 
     /**
@@ -471,4 +477,38 @@ if __name__ == "__main__":
     }
 }
 
-module.exports = new PythonResolver();
+const registry = new Map();
+const defaultInstance = new PythonResolver();
+
+function getPythonResolver(sessionKey) {
+    const key = (sessionKey && String(sessionKey).trim()) ? String(sessionKey).trim() : '_default';
+    if (key === '_default') return defaultInstance;
+    if (!registry.has(key)) registry.set(key, new PythonResolver(key));
+    return registry.get(key);
+}
+
+/**
+ * Rimuove una sessione resolver (cron, script su disco). Non usare per _default.
+ * @param {string} sessionKey
+ */
+function removeResolverSession(sessionKey) {
+    const key = (sessionKey && String(sessionKey).trim()) ? String(sessionKey).trim() : '_default';
+    if (key === '_default') return;
+    const instance = registry.get(key);
+    if (!instance) return;
+    try {
+        instance.stopScheduledUpdates();
+        if (instance.scriptPath && fs.existsSync(instance.scriptPath)) {
+            fs.unlinkSync(instance.scriptPath);
+            console.log('✓ Resolver sessione rimosso:', instance.scriptPath);
+        }
+        instance.resolvedLinksCache.clear();
+    } catch (e) {
+        console.error('Errore rimozione Resolver sessione:', e.message);
+    }
+    registry.delete(key);
+}
+
+module.exports = defaultInstance;
+module.exports.getPythonResolver = getPythonResolver;
+module.exports.removeResolverSession = removeResolverSession;

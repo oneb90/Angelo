@@ -42,11 +42,12 @@ function renderGatePage(manifest, returnPath) {
 </html>`;
 }
 
-const renderConfigPage = (protocol, host, query, manifest) => {
+const renderConfigPage = (protocol, host, query, manifest, sessionKey = null) => {
    // Verifica se il file addon-config.json esiste
    const configPath = path.join(__dirname, 'addon-config.json');
    const m3uDefaultUrl = 'https://github.com/mccoy88f/OMG-Premium-TV/blob/main/tv.png?raw=true';
    const m3uIsDisabled = !fs.existsSync(configPath);
+   const sessionIdDisplay = sessionKey || '—';
 
    return `
        <!DOCTYPE html>
@@ -285,18 +286,26 @@ const renderConfigPage = (protocol, host, query, manifest) => {
                    <h2 style="margin-top: 0;">Proteggi accesso alla home</h2>
                    <p style="color: #aaa; font-size: 14px;">Se attivi la protezione, alla prossima visita sarà richiesta una password per vedere questa pagina.</p>
                    <label><input type="checkbox" id="homeAuthEnabled" ${query.homeAuthEnabled === 'true' ? 'checked' : ''}> Abilita protezione con password</label>
+                   <div id="homeAuthWhenEnabled" style="margin-top: 10px; display: none;">
+                       <span style="color: #4CAF50;">Protezione attiva.</span>
+                       <button type="button" id="homeAuthEditBtn" onclick="toggleEditHomeAuth()" style="margin-left: 10px;">Modifica password</button>
+                   </div>
                    <div id="homeAuthFields" style="margin-top: 10px; display: none;">
                        <label>Password:</label>
                        <input type="password" id="homeAuthPassword" placeholder="Nuova password">
                        <label>Conferma password:</label>
                        <input type="password" id="homeAuthConfirm" placeholder="Ripeti password">
                        <button type="button" onclick="saveHomeAuth()" style="margin-top: 10px;">Salva protezione</button>
+                       <button type="button" id="homeAuthCancelBtn" onclick="cancelEditHomeAuth()" style="margin-left: 10px; background: #666;">Annulla</button>
                        <span id="homeAuthMessage" style="margin-left: 10px; font-size: 14px;"></span>
                    </div>
                </div>
                
                <div class="config-form">
                    <h2>Genera Configurazione</h2>
+                   <p class="session-id-row" style="margin: 0 0 1rem 0; font-size: 14px; color: #bbb;">
+                       ID Sessione: <code id="sessionIdDisplay" style="background: rgba(0,0,0,0.3); padding: 2px 8px; border-radius: 4px; font-size: 13px;">${sessionIdDisplay}</code>
+                   </p>
                    <form id="configForm" onsubmit="updateConfig(event)">
                        <label>M3U URL:</label>
                        <input type="text" name="m3u" 

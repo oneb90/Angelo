@@ -427,6 +427,24 @@ class CacheManager extends EventEmitter {
             this.pollingInterval = null;
         }
     }
+
+    /**
+     * Distrugge la sessione: ferma polling e rimuove il file DB da disco.
+     * Da usare quando la sessione scade (es. inattività 24h).
+     */
+    destroy() {
+        this.cleanup();
+        try {
+            if (this.dbPath && fs.existsSync(this.dbPath)) {
+                fs.unlinkSync(this.dbPath);
+                console.log('✓ Cache sessione rimossa:', this.dbPath);
+            }
+        } catch (e) {
+            console.error('Errore rimozione cache sessione:', e.message);
+        }
+        this.db = null;
+        this.cache = null;
+    }
 }
 
 module.exports = async (config, sessionId) => {

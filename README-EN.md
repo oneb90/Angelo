@@ -25,7 +25,9 @@ A coffee ☕ or a beer 🍺 is a much appreciated gesture of recognition and hel
 
 ### ✨ New Features
 - **🔒 Home password protection**: Option in the web UI to protect access to the configuration page with a password. When enabled, anyone opening the home (or the "Configure" link from Stremio) must enter the password; using the addon from Stremio does not require a password.
-- **🔄 Sessions and isolated cache**: Cache is automatically isolated per configuration (same config = same cache). Multiple users or different configurations can use the server at the same time without overwriting each other's cache.
+- **🔄 Sessions and isolated cache**: Cache is automatically isolated per configuration (same config = same cache). EPG, Python Resolver, and Playlist Generator are also per-session. Multiple users or different configurations can use the server at the same time without overwriting each other's data.
+- **🆔 Session ID**: The **Session ID** (derived from the configuration) is shown on the home/config page when you generate a configuration. The ID is also included in backup (export) and updated on restore (import).
+- **⏰ Session expiry (24h)**: If a session receives no requests for **24 hours**, it expires automatically: all cache for that session (M3U cache, EPG, resolver, generator) is removed. On the next request with the same config, the session is recreated and data is repopulated from the URLs.
 
 ### 🔧 Improvements
 - **🔒 Home protection UI**: When protection is active you see the checkbox and a "Modifica password" (Change password) button; password and confirm fields only appear when you click it.
@@ -163,12 +165,12 @@ Click on a channel to see:
 
 ### 📤 Configuration Backup
 1. Click on **BACKUP CONFIGURATION** 💾
-2. A JSON file will be downloaded with all your settings
+2. A JSON file will be downloaded with all your settings (including the **Session ID** for the current config)
 
 ### 📥 Configuration Restore
 1. Click on **RESTORE CONFIGURATION** 📤
 2. Select the previously saved JSON file
-3. Wait for the restore to complete
+3. Wait for the restore to complete (the Session ID on the page updates according to the restored config)
 
 ## ❓ Troubleshooting
 
@@ -212,6 +214,8 @@ Click on a channel to see:
 - ✅ Configuration backup and restore
 - ✅ Optional password protection for the configuration page
 - ✅ Cache isolated per configuration (concurrent access)
+- ✅ Session ID visible and included in export/import
+- ✅ Automatic expiry of inactive sessions (24h) to free space
 - TECH SPEC on [wiki](https://github.com/mccoy88f/OMG-Premium-TV/wiki/Tech-Spec-%E2%80%90-Specifiche-Teniche))
 
 

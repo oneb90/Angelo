@@ -31,14 +31,38 @@ const getViewScripts = (protocol, host) => {
         // Proteggi accesso alla home
         (function initHomeAuth() {
             const cb = document.getElementById('homeAuthEnabled');
+            const whenEnabled = document.getElementById('homeAuthWhenEnabled');
             const fields = document.getElementById('homeAuthFields');
-            if (!cb || !fields) return;
+            if (!cb || !whenEnabled || !fields) return;
             fetch('/api/home-auth/status').then(r => r.json()).then(function(data) {
                 cb.checked = data.enabled;
-                fields.style.display = data.enabled ? 'block' : 'none';
+                whenEnabled.style.display = data.enabled ? 'block' : 'none';
+                fields.style.display = 'none';
             }).catch(function() {});
-            cb.addEventListener('change', function() { fields.style.display = cb.checked ? 'block' : 'none'; });
+            cb.addEventListener('change', function() {
+                if (cb.checked) {
+                    whenEnabled.style.display = 'none';
+                    fields.style.display = 'block';
+                } else {
+                    whenEnabled.style.display = 'none';
+                    fields.style.display = 'none';
+                }
+            });
         })();
+        function toggleEditHomeAuth() {
+            document.getElementById('homeAuthFields').style.display = 'block';
+            document.getElementById('homeAuthWhenEnabled').style.display = 'none';
+            document.getElementById('homeAuthMessage').textContent = '';
+        }
+        function cancelEditHomeAuth() {
+            document.getElementById('homeAuthFields').style.display = 'none';
+            document.getElementById('homeAuthPassword').value = '';
+            document.getElementById('homeAuthConfirm').value = '';
+            document.getElementById('homeAuthMessage').textContent = '';
+            if (document.getElementById('homeAuthEnabled').checked) {
+                document.getElementById('homeAuthWhenEnabled').style.display = 'block';
+            }
+        }
         function saveHomeAuth() {
             const enabled = document.getElementById('homeAuthEnabled').checked;
             const password = document.getElementById('homeAuthPassword').value;
@@ -64,6 +88,12 @@ const getViewScripts = (protocol, host) => {
                     msg.style.color = '#4CAF50';
                     document.getElementById('homeAuthPassword').value = '';
                     document.getElementById('homeAuthConfirm').value = '';
+                    document.getElementById('homeAuthFields').style.display = 'none';
+                    if (enabled) {
+                        document.getElementById('homeAuthWhenEnabled').style.display = 'block';
+                    } else {
+                        document.getElementById('homeAuthWhenEnabled').style.display = 'none';
+                    }
                 } else {
                     msg.textContent = data.message || 'Errore';
                     msg.style.color = '#f44336';
@@ -91,6 +121,27 @@ const getViewScripts = (protocol, host) => {
             });
             
             return params.toString();
+        }
+
+        function getConfigObject() {
+            const qs = getConfigQueryString();
+            return Object.fromEntries(new URLSearchParams(qs));
+        }
+
+        async function updateSessionIdDisplay() {
+            const el = document.getElementById('sessionIdDisplay');
+            if (!el) return;
+            try {
+                const r = await fetch('/api/session-key', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(getConfigObject())
+                });
+                const d = await r.json();
+                el.textContent = d.sessionKey || '—';
+            } catch (e) {
+                el.textContent = '—';
+            }
         }
 
         function showConfirmModal() {
@@ -133,7 +184,7 @@ const getViewScripts = (protocol, host) => {
             });
         }
 
-        function backupConfig() {
+        async function backupConfig() {
             const queryString = getConfigQueryString();
             const params = Object.fromEntries(new URLSearchParams(queryString));
             
@@ -144,6 +195,15 @@ const getViewScripts = (protocol, host) => {
                 document.getElementById('resolverUpdateInterval').value || 
                 document.querySelector('input[name="resolver_update_interval"]')?.value || 
                 '';
+            try {
+                const r = await fetch('/api/session-key', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(getConfigObject())
+                });
+                const d = await r.json();
+                if (d.sessionKey) params.session_key = d.sessionKey;
+            } catch (e) {}
                 
             const configBlob = new Blob([JSON.stringify(params, null, 2)], {type: 'application/json'});
             const url = URL.createObjectURL(configBlob);
@@ -167,6 +227,7 @@ const getViewScripts = (protocol, host) => {
         
                     const form = document.getElementById('configForm');
                     for (const [key, value] of Object.entries(config)) {
+                        if (key === 'session_key') continue;
                         const input = form.elements[key];
                         if (input) {
                             if (input.type === 'checkbox') {
@@ -176,6 +237,7 @@ const getViewScripts = (protocol, host) => {
                             }
                         }
                     }
+                    updateSessionIdDisplay();
 
                     if (config.resolver_update_interval) {
                         document.getElementById('resolverUpdateInterval').value = config.resolver_update_interval;
@@ -199,6 +261,7 @@ const getViewScripts = (protocol, host) => {
                                 'Content-Type': 'application/json'
                             },
                             body: JSON.stringify({
+                                ...getConfigObject(),
                                 action: 'schedule',
                                 interval: config.resolver_update_interval
                             })
@@ -216,6 +279,7 @@ const getViewScripts = (protocol, host) => {
                                 'Content-Type': 'application/json'
                             },
                             body: JSON.stringify({
+                                ...config,
                                 action: 'download',
                                 url: config.python_script_url
                             })
@@ -233,6 +297,7 @@ const getViewScripts = (protocol, host) => {
                                 'Content-Type': 'application/json'
                             },
                             body: JSON.stringify({
+                                ...config,
                                 action: 'execute'
                             })
                         });
@@ -257,12 +322,13 @@ const getViewScripts = (protocol, host) => {
                                 'Content-Type': 'application/json'
                             },
                             body: JSON.stringify({
+                                ...config,
                                 action: 'schedule',
                                 interval: config.python_update_interval
                             })
                         });
                     }
-        
+
                     // NUOVO: Avvia esplicitamente la ricostruzione della cache
                     if (config.m3u) {
                         try {
@@ -358,6 +424,7 @@ const getViewScripts = (protocol, host) => {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        ...getConfigObject(),
                         action: 'download',
                         url: url
                     })
@@ -389,6 +456,7 @@ const getViewScripts = (protocol, host) => {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        ...getConfigObject(),
                         action: 'execute'
                     })
                 });
@@ -418,6 +486,7 @@ const getViewScripts = (protocol, host) => {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        ...getConfigObject(),
                         action: 'status'
                     })
                 });
@@ -425,16 +494,25 @@ const getViewScripts = (protocol, host) => {
                 const data = await response.json();
                 showPythonStatus(data);
                 
-                if (data.m3uExists) {
-                    showM3uUrl(window.location.origin + '/generated-m3u');
+                if (data.m3uExists && data.m3uUrl) {
+                    showM3uUrl(data.m3uUrl);
                 }
             } catch (error) {
                 alert('Errore nella richiesta: ' + error.message);
             }
         }
 
-        function useGeneratedM3u() {
-            const m3uUrl = window.location.origin + '/generated-m3u';
+        async function useGeneratedM3u() {
+            let m3uUrl = window.location.origin + '/generated-m3u';
+            try {
+                const r = await fetch('/api/python-script', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ ...getConfigObject(), action: 'status' })
+                });
+                const d = await r.json();
+                if (d.m3uUrl) m3uUrl = d.m3uUrl;
+            } catch (e) {}
             document.querySelector('input[name="m3u"]').value = m3uUrl;
             
             // Ottieni i valori attuali dai campi
@@ -470,6 +548,7 @@ const getViewScripts = (protocol, host) => {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        ...getConfigObject(),
                         action: 'schedule',
                         interval: interval
                     })
@@ -496,6 +575,7 @@ const getViewScripts = (protocol, host) => {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        ...getConfigObject(),
                         action: 'stopSchedule'
                     })
                 });
@@ -591,6 +671,7 @@ const getViewScripts = (protocol, host) => {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        ...getConfigObject(),
                         action: 'download',
                         url: url
                     })
@@ -624,6 +705,7 @@ const getViewScripts = (protocol, host) => {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        ...getConfigObject(),
                         action: 'create-template'
                     })
                 });
@@ -655,6 +737,7 @@ const getViewScripts = (protocol, host) => {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        ...getConfigObject(),
                         action: 'check-health'
                     })
                 });
@@ -680,6 +763,7 @@ const getViewScripts = (protocol, host) => {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        ...getConfigObject(),
                         action: 'status'
                     })
                 });
@@ -699,6 +783,7 @@ const getViewScripts = (protocol, host) => {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        ...getConfigObject(),
                         action: 'clear-cache'
                     })
                 });
@@ -744,6 +829,7 @@ const getViewScripts = (protocol, host) => {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        ...getConfigObject(),
                         action: 'schedule',
                         interval: interval
                     })
@@ -805,6 +891,7 @@ const getViewScripts = (protocol, host) => {
                         'Content-Type': 'application/json'
                     },
                     body: JSON.stringify({
+                        ...getConfigObject(),
                         action: 'stopSchedule'
                     })
                 });

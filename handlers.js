@@ -47,8 +47,9 @@ function cleanNameForImage(name) {
     return cleaned || 'No Name';
 }
 
-async function catalogHandler({ type, id, extra, config: userConfig, cacheManager: cm }) {
+async function catalogHandler({ type, id, extra, config: userConfig, cacheManager: cm, epgManager: em, pythonResolver, pythonRunner }) {
     const cacheManager = cm || global.CacheManager;
+    const epgManager = em || require('./epg-manager');
     try {
         if (!userConfig.m3u) {
             console.log('[Handlers] URL M3U mancante nella configurazione');
@@ -130,7 +131,7 @@ async function catalogHandler({ type, id, extra, config: userConfig, cacheManage
             }
 
             if ((!meta.poster || !meta.background || !meta.logo) && channel.streamInfo?.tvg?.id) {
-                const epgIcon = EPGManager.getChannelIcon(channel.streamInfo.tvg.id);
+                const epgIcon = epgManager.getChannelIcon(channel.streamInfo.tvg.id);
                 if (epgIcon) {
                     meta.poster = meta.poster || epgIcon;
                     meta.background = meta.background || epgIcon;
@@ -138,7 +139,7 @@ async function catalogHandler({ type, id, extra, config: userConfig, cacheManage
                 }
             }
 
-            return enrichWithEPG(meta, channel.streamInfo?.tvg?.id, userConfig);
+            return enrichWithEPG(meta, channel.streamInfo?.tvg?.id, userConfig, epgManager);
         });
 
         return {
@@ -152,15 +153,16 @@ async function catalogHandler({ type, id, extra, config: userConfig, cacheManage
     }
 }
 
-function enrichWithEPG(meta, channelId, userConfig) {
+function enrichWithEPG(meta, channelId, userConfig, epgManager) {
+    const epg = epgManager || require('./epg-manager');
     if (!userConfig.epg_enabled || !channelId) {
         meta.description = `Canale live: ${meta.name}`;
         meta.releaseInfo = 'LIVE';
         return meta;
     }
 
-    const currentProgram = EPGManager.getCurrentProgram(normalizeId(channelId));
-    const upcomingPrograms = EPGManager.getUpcomingPrograms(normalizeId(channelId));
+    const currentProgram = epg.getCurrentProgram(normalizeId(channelId));
+    const upcomingPrograms = epg.getUpcomingPrograms(normalizeId(channelId));
 
     if (currentProgram) {
         meta.description = `IN ONDA ORA:\n${currentProgram.title}`;
@@ -188,27 +190,23 @@ function enrichWithEPG(meta, channelId, userConfig) {
     return meta;
 }
 
-async function streamHandler({ id, config: userConfig, cacheManager: cm }) {
+async function streamHandler({ id, config: userConfig, cacheManager: cm, epgManager: em, pythonResolver, pythonRunner }) {
     const cacheManager = cm || global.CacheManager;
+    const epgManager = em || require('./epg-manager');
+    const runner = pythonRunner || require('./python-runner');
     try {
         if (!userConfig.m3u) {
             console.log('M3U URL mancante');
             return { streams: [] };
         }
 
-        // Aggiorna sempre la configurazione
         await cacheManager.updateConfig(userConfig);
 
         const channelId = id.split('|')[1];
 
-        // Gestione canale speciale per la rigenerazione playlist
         if (channelId === 'rigeneraplaylistpython') {
             console.log('\n=== Richiesta rigenerazione playlist Python ===');
-
-
-            // Esegui lo script Python
-            const PythonRunner = require('./python-runner');
-            const result = await PythonRunner.executeScript();
+            const result = await runner.executeScript();
 
             if (result) {
                 console.log('✓ Script Python eseguito con successo');
@@ -233,7 +231,7 @@ async function streamHandler({ id, config: userConfig, cacheManager: cm }) {
                 return {
                     streams: [{
                         name: 'Errore',
-                        title: `❌ Errore: ${PythonRunner.lastError || 'Errore sconosciuto'}`,
+                        title: `❌ Errore: ${runner.lastError || 'Errore sconosciuto'}`,
                         url: 'https://static.vecteezy.com/system/resources/previews/001/803/236/mp4/no-signal-bad-tv-free-video.mp4',
                         behaviorHints: {
                             notWebReady: false,
@@ -285,7 +283,7 @@ async function streamHandler({ id, config: userConfig, cacheManager: cm }) {
                     }
                 };
 
-                const resolvedStreams = await ResolverStreamManager.getResolvedStreams(streamDetails, userConfig);
+                const resolvedStreams = await ResolverStreamManager.getResolvedStreams(streamDetails, userConfig, pythonResolver || require('./python-resolver'));
 
                 if (resolvedStreams && resolvedStreams.length > 0) {
                     console.log(`✓ Ottenuti ${resolvedStreams.length} flussi risolti`);
@@ -375,7 +373,7 @@ async function streamHandler({ id, config: userConfig, cacheManager: cm }) {
         };
 
         if ((!meta.poster || !meta.background || !meta.logo) && channel.streamInfo?.tvg?.id) {
-            const epgIcon = EPGManager.getChannelIcon(channel.streamInfo.tvg.id);
+            const epgIcon = epgManager.getChannelIcon(channel.streamInfo.tvg.id);
             if (epgIcon) {
                 meta.poster = meta.poster || epgIcon;
                 meta.background = meta.background || epgIcon;

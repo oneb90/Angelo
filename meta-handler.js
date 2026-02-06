@@ -1,23 +1,19 @@
 const config = require('./config');
-const EPGManager = require('./epg-manager');
 
 function normalizeId(id) {
     return id?.toLowerCase().replace(/[^\w.]/g, '').trim() || '';
 }
 
-function enrichWithDetailedEPG(meta, channelId, userConfig) {
-
+function enrichWithDetailedEPG(meta, channelId, userConfig, epgManager) {
+    const epg = epgManager || require('./epg-manager');
     if (!userConfig.epg_enabled) {
         console.log('❌ EPG non abilitato');
         return meta;
     }
 
     const normalizedId = normalizeId(channelId);
-
-    const currentProgram = EPGManager.getCurrentProgram(normalizedId);
-
-
-    const upcomingPrograms = EPGManager.getUpcomingPrograms(normalizedId);
+    const currentProgram = epg.getCurrentProgram(normalizedId);
+    const upcomingPrograms = epg.getUpcomingPrograms(normalizedId);
 
     if (currentProgram) {
         let description = [];
@@ -58,8 +54,9 @@ function enrichWithDetailedEPG(meta, channelId, userConfig) {
     return meta;
 }
 
-async function metaHandler({ type, id, config: userConfig, cacheManager: cm }) {
+async function metaHandler({ type, id, config: userConfig, cacheManager: cm, epgManager: em }) {
     const cacheManager = cm || global.CacheManager;
+    const epgManager = em || require('./epg-manager');
     try {
 
         if (!userConfig.m3u) {
@@ -107,7 +104,7 @@ async function metaHandler({ type, id, config: userConfig, cacheManager: cm }) {
         };
 
         if ((!meta.poster || !meta.background || !meta.logo) && channel.streamInfo?.tvg?.id) {
-            const epgIcon = EPGManager.getChannelIcon(normalizeId(channel.streamInfo.tvg.id));
+            const epgIcon = epgManager.getChannelIcon(normalizeId(channel.streamInfo.tvg.id));
             if (epgIcon) {
                 meta.poster = meta.poster || epgIcon;
                 meta.background = meta.background || epgIcon;
@@ -130,7 +127,7 @@ async function metaHandler({ type, id, config: userConfig, cacheManager: cm }) {
 
         meta.description = baseDescription.join('\n');
 
-        const enrichedMeta = enrichWithDetailedEPG(meta, channel.streamInfo?.tvg?.id, userConfig);
+        const enrichedMeta = enrichWithDetailedEPG(meta, channel.streamInfo?.tvg?.id, userConfig, epgManager);
 
         console.log('✓ Meta handler completato');
         return { meta: enrichedMeta };

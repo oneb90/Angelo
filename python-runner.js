@@ -5,22 +5,39 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const execAsync = promisify(exec);
 const cron = require('node-cron');
+const crypto = require('crypto');
+
+function safeRunnerNames(sessionKey) {
+    if (!sessionKey || sessionKey === '_default') {
+        return {
+            scriptPath: path.join(__dirname, 'temp_script.py'),
+            m3uOutputPath: path.join(__dirname, 'generated_playlist.m3u')
+        };
+    }
+    const hash = crypto.createHash('sha256').update(String(sessionKey)).digest('hex').slice(0, 16);
+    const tempDir = path.join(__dirname, 'temp');
+    return {
+        scriptPath: path.join(tempDir, `script_${hash}.py`),
+        m3uOutputPath: path.join(tempDir, `generated_${hash}.m3u`)
+    };
+}
 
 class PythonRunner {
-    constructor() {
-        this.scriptPath = path.join(__dirname, 'temp_script.py');
-        this.m3uOutputPath = path.join(__dirname, 'generated_playlist.m3u');
+    constructor(sessionKey = null) {
+        this.sessionKey = sessionKey;
+        const paths = safeRunnerNames(sessionKey);
+        this.scriptPath = paths.scriptPath;
+        this.m3uOutputPath = paths.m3uOutputPath;
         this.lastExecution = null;
         this.lastError = null;
         this.isRunning = false;
         this.scriptUrl = null;
         this.cronJob = null;
         this.updateInterval = null;
+        this._cacheManagerRef = null;
 
-        // Crea la directory temp se non esiste
-        if (!fs.existsSync(path.join(__dirname, 'temp'))) {
-            fs.mkdirSync(path.join(__dirname, 'temp'));
-        }
+        const tempDir = path.join(__dirname, 'temp');
+        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
     }
 
     /**
@@ -140,11 +157,10 @@ class PythonRunner {
      * @param {string} timeFormat - Formato orario "HH:MM" o "H:MM"
      * @returns {boolean} - true se la pianificazione è stata impostata con successo
      */
-    scheduleUpdate(timeFormat) {
-        // Ferma eventuali pianificazioni esistenti
+    scheduleUpdate(timeFormat, cacheManager = null) {
+        this._cacheManagerRef = cacheManager || global.CacheManager;
         this.stopScheduledUpdates();
 
-        // Validazione del formato orario
         if (!timeFormat || !/^\d{1,2}:\d{2}$/.test(timeFormat)) {
             console.error('❌ Formato orario non valido. Usa HH:MM o H:MM');
             this.lastError = 'Formato orario non valido. Usa HH:MM o H:MM';
@@ -152,7 +168,6 @@ class PythonRunner {
         }
 
         try {
-            // Estrai ore e minuti
             const [hours, minutes] = timeFormat.split(':').map(Number);
 
             if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
@@ -161,39 +176,27 @@ class PythonRunner {
                 return false;
             }
 
-            // Crea una pianificazione cron
-            // Se è 0:30, esegui ogni 30 minuti
-            // Se è 1:00, esegui ogni ora
-            // Se è 12:00, esegui ogni 12 ore
             let cronExpression;
-
             if (hours === 0) {
-                // Esegui ogni X minuti
                 cronExpression = `*/${minutes} * * * *`;
                 console.log(`✓ Pianificazione impostata: ogni ${minutes} minuti`);
             } else {
-                // Esegui ogni X ore
                 cronExpression = `${minutes} */${hours} * * *`;
                 console.log(`✓ Pianificazione impostata: ogni ${hours} ore e ${minutes} minuti`);
             }
 
+            const cacheRef = this._cacheManagerRef;
             this.cronJob = cron.schedule(cronExpression, async () => {
                 console.log(`\n=== Esecuzione automatica script Python (${new Date().toLocaleString()}) ===`);
                 const success = await this.executeScript();
 
-                // Dopo l'esecuzione dello script, aggiorna la cache se necessario
-                if (success) {
+                if (success && cacheRef) {
                     try {
-                        // Usa l'URL attualmente configurato nella cache
-                        const currentM3uUrl = global.CacheManager.cache.m3uUrl;
-
+                        const currentM3uUrl = cacheRef.cache && cacheRef.cache.m3uUrl;
                         if (currentM3uUrl) {
                             console.log(`\n=== Ricostruzione cache dopo esecuzione automatica dello script ===`);
-                            console.log(`Utilizzo l'URL corrente: ${currentM3uUrl}`);
-                            await global.CacheManager.rebuildCache(currentM3uUrl);
+                            await cacheRef.rebuildCache(currentM3uUrl);
                             console.log(`✓ Cache ricostruita con successo dopo esecuzione automatica`);
-                        } else {
-                            console.log(`❌ Nessun URL M3U configurato nella cache, impossibile ricostruire`);
                         }
                     } catch (cacheError) {
                         console.error(`❌ Errore nella ricostruzione della cache dopo esecuzione automatica:`, cacheError);
@@ -489,4 +492,40 @@ http://127.0.0.1/regenerate`;
     }
 }
 
-module.exports = new PythonRunner();
+const registry = new Map();
+const defaultInstance = new PythonRunner();
+
+function getPythonRunner(sessionKey) {
+    const key = (sessionKey && String(sessionKey).trim()) ? String(sessionKey).trim() : '_default';
+    if (key === '_default') return defaultInstance;
+    if (!registry.has(key)) registry.set(key, new PythonRunner(key));
+    return registry.get(key);
+}
+
+/**
+ * Rimuove una sessione runner (cron, script e M3U su disco). Non usare per _default.
+ * @param {string} sessionKey
+ */
+function removeRunnerSession(sessionKey) {
+    const key = (sessionKey && String(sessionKey).trim()) ? String(sessionKey).trim() : '_default';
+    if (key === '_default') return;
+    const instance = registry.get(key);
+    if (!instance) return;
+    try {
+        instance.stopScheduledUpdates();
+        if (instance.scriptPath && fs.existsSync(instance.scriptPath)) {
+            fs.unlinkSync(instance.scriptPath);
+        }
+        if (instance.m3uOutputPath && fs.existsSync(instance.m3uOutputPath)) {
+            fs.unlinkSync(instance.m3uOutputPath);
+        }
+        console.log('✓ Runner sessione rimosso:', key);
+    } catch (e) {
+        console.error('Errore rimozione Runner sessione:', e.message);
+    }
+    registry.delete(key);
+}
+
+module.exports = defaultInstance;
+module.exports.getPythonRunner = getPythonRunner;
+module.exports.removeRunnerSession = removeRunnerSession;

@@ -7,12 +7,20 @@ const cron = require('node-cron');
 const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+
+function safeEpgDbName(sessionKey) {
+    if (!sessionKey || sessionKey === '_default') return 'epg.db';
+    const hash = crypto.createHash('sha256').update(String(sessionKey)).digest('hex').slice(0, 16);
+    return `epg_${hash}.db`;
+}
 
 class EPGManager {
-    constructor() {
+    constructor(sessionKey = null) {
+        this.sessionKey = sessionKey;
         this.epgData = null;
         this.db = null;
-        this.dbPath = path.join(__dirname, 'data', 'epg.db');
+        this.dbPath = path.join(__dirname, 'data', safeEpgDbName(sessionKey));
         this.lastUpdate = null;
         this.isUpdating = false;
         this.CHUNK_SIZE = 5000;
@@ -20,7 +28,9 @@ class EPGManager {
         this.cronJob = null;
         this.cleanupJob = null;
         this.validateAndSetTimezone();
-        this.initializeDatabase();
+        if (!sessionKey) {
+            this.initializeDatabase();
+        }
         this.schedulePeriodicCleanup();
     }
 
@@ -587,4 +597,49 @@ class EPGManager {
     }
 }
 
-module.exports = new EPGManager();
+const registry = new Map();
+const defaultInstance = new EPGManager();
+
+async function getEPGManager(sessionKey) {
+    const key = (sessionKey && String(sessionKey).trim()) ? String(sessionKey).trim() : '_default';
+    if (key === '_default') return defaultInstance;
+    if (!registry.has(key)) {
+        const instance = new EPGManager(key);
+        await instance.initializeDatabase();
+        registry.set(key, instance);
+    }
+    return registry.get(key);
+}
+
+/**
+ * Rimuove una sessione EPG (cron, file DB). Non usare per _default.
+ * @param {string} sessionKey
+ */
+function removeEPGSession(sessionKey) {
+    const key = (sessionKey && String(sessionKey).trim()) ? String(sessionKey).trim() : '_default';
+    if (key === '_default') return;
+    const instance = registry.get(key);
+    if (!instance) return;
+    try {
+        if (instance.cronJob) {
+            instance.cronJob.stop();
+            instance.cronJob = null;
+        }
+        if (instance.cleanupJob) {
+            instance.cleanupJob.stop();
+            instance.cleanupJob = null;
+        }
+        if (instance.dbPath && fs.existsSync(instance.dbPath)) {
+            fs.unlinkSync(instance.dbPath);
+            console.log('✓ EPG sessione rimosso:', instance.dbPath);
+        }
+    } catch (e) {
+        console.error('Errore rimozione EPG sessione:', e.message);
+    }
+    instance.db = null;
+    registry.delete(key);
+}
+
+module.exports = defaultInstance;
+module.exports.getEPGManager = getEPGManager;
+module.exports.removeEPGSession = removeEPGSession;

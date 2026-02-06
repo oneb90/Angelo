@@ -28,7 +28,9 @@ Trabajar en este addon y mantenerlo actualizado ha costado muchísimas horas y m
 
 ### ✨ Nuevas funcionalidades
 - **🔒 Protección por contraseña de la home**: Opción en la interfaz web para proteger el acceso a la página de configuración con una contraseña. Si está activa, quien abra la home (o el enlace «Configurar» desde Stremio) debe introducir la contraseña; el uso del addon desde Stremio no requiere contraseña.
-- **🔄 Sesiones y caché aislada**: La caché se aísla automáticamente por configuración (misma config = misma caché). Varios usuarios o configuraciones distintas pueden usar el servidor a la vez sin pisarse.
+- **🔄 Sesiones y caché aislada**: La caché se aísla automáticamente por configuración (misma config = misma caché). EPG, Resolver Python y Generador de playlist son también por sesión. Varios usuarios o configuraciones distintas pueden usar el servidor a la vez sin pisarse.
+- **🆔 ID de sesión**: En home/config se muestra el **ID de sesión** (derivado de la configuración) cuando generas una configuración. El ID se incluye también en el backup (exportar) y se actualiza al restaurar (importar).
+- **⏰ Caducidad de sesiones (24h)**: Si una sesión no recibe peticiones durante **24 horas**, caduca automáticamente: se elimina toda la caché de esa sesión (caché M3U, EPG, resolver, generador). En la siguiente petición con la misma config la sesión se recrea y los datos se rellenan desde las URL.
 
 ### 🔧 Mejoras
 - **🔒 Interfaz de protección**: Con la protección activa se ve la casilla y el botón «Modifica password»; los campos de contraseña y confirmación solo aparecen al pulsarlo.
@@ -166,12 +168,12 @@ Haz clic en un canal para ver:
 
 ### 📤 Backup configuración
 1. Haz clic en **BACKUP CONFIGURACIÓN** 💾
-2. Se descargará un archivo JSON con todos tus ajustes
+2. Se descargará un archivo JSON con todos tus ajustes (incluido el **ID de sesión** de la config actual)
 
 ### 📥 Restauración configuración
 1. Haz clic en **RESTAURAR CONFIGURACIÓN** 📤
 2. Selecciona el archivo JSON previamente guardado
-3. Espera a que se complete la restauración
+3. Espera a que se complete la restauración (el ID de sesión en la página se actualiza según la config restaurada)
 
 ## ❓ Resolución de problemas
 
@@ -215,6 +217,8 @@ Haz clic en un canal para ver:
 - ✅ Backup y restauración de configuración
 - ✅ Protección por contraseña de la página de configuración (opcional)
 - ✅ Caché aislada por configuración (accesos simultáneos)
+- ✅ ID de sesión visible e incluido en exportar/importar
+- ✅ Caducidad automática de sesiones inactivas (24h) para liberar espacio
 - Especificaciones técnicas en la [wiki](https://github.com/mccoy88f/OMG-Premium-TV/wiki/Tech-Spec-%E2%80%90-Specifiche-Teniche)
 
 ## 📱 Compatibilidad

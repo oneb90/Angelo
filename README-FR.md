@@ -28,7 +28,10 @@ Un café ☕ ou une bière 🍺 sont un geste de reconnaissance très apprécié
 
 ### ✨ Nouvelles fonctionnalités
 - **🔒 Protection par mot de passe de la home** : Option dans l’interface web pour protéger l’accès à la page de configuration par un mot de passe. Si activée, toute personne ouvrant la home (ou le lien « Configurer » depuis Stremio) doit saisir le mot de passe ; l’utilisation de l’addon depuis Stremio ne demande pas de mot de passe.
-- **🔄 Sessions et cache isolé** : Le cache est isolé automatiquement par configuration (même config = même cache). Plusieurs utilisateurs ou configurations différentes peuvent utiliser le serveur en même temps sans s’écraser mutuellement.
+- **🔄 Sessions et cache isolé** : Le cache est isolé automatiquement par configuration (même config = même cache). L'EPG, le Résolveur Python et le Générateur de playlist sont aussi par session. Plusieurs utilisateurs ou configurations différentes peuvent utiliser le serveur en même temps sans s’écraser mutuellement.
+
+- **🆔 ID de session** : L'**ID de session** (dérivé de la configuration) est affiché sur la page home/config lorsque vous générez une configuration. L'ID est inclus dans la sauvegarde (export) et mis à jour à la restauration (import).
+- **⏰ Expiration des sessions (24h)** : Si une session ne reçoit aucune requête pendant **24 heures**, elle expire automatiquement : tout le cache de cette session (cache M3U, EPG, résolveur, générateur) est supprimé. À la prochaine requête avec la même config, la session est recréée et les données sont rechargées depuis les URL.
 
 ### 🔧 Améliorations
 - **🔒 Interface protection home** : Quand la protection est active, la case et le bouton « Modifica password » (Modifier le mot de passe) sont visibles ; les champs mot de passe et confirmation n’apparaissent qu’en cliquant dessus.
@@ -166,12 +169,12 @@ Cliquez sur une chaîne pour voir :
 
 ### 📤 Sauvegarde de la configuration
 1. Cliquez sur **SAUVEGARDER CONFIGURATION** 💾
-2. Un fichier JSON sera téléchargé avec tous vos paramètres
+2. Un fichier JSON sera téléchargé avec tous vos paramètres (y compris l'**ID de session** de la config actuelle)
 
 ### 📥 Restauration de la configuration
 1. Cliquez sur **RESTAURER CONFIGURATION** 📤
 2. Sélectionnez le fichier JSON précédemment sauvegardé
-3. Attendez la fin de la restauration
+3. Attendez la fin de la restauration (l'ID de session affiché sur la page se met à jour selon la config restaurée)
 
 ## ❓ Résolution des problèmes
 
@@ -215,6 +218,8 @@ Cliquez sur une chaîne pour voir :
 - ✅ Sauvegarde et restauration de la configuration
 - ✅ Protection par mot de passe de la page de configuration (optionnelle)
 - ✅ Cache isolée par configuration (accès simultanés)
+- ✅ ID de session visible et inclus dans l'export/import
+- ✅ Expiration automatique des sessions inactives (24h) pour libérer de l'espace
 - Spécifications techniques dans le [wiki](https://github.com/mccoy88f/OMG-Premium-TV/wiki/Tech-Spec-%E2%80%90-Specifiche-Teniche)
 
 ## 📱 Compatibilité

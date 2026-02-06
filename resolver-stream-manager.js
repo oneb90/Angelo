@@ -26,40 +26,31 @@ class ResolverStreamManager {
      * @param {Object} userConfig - Configurazione utente
      * @returns {Promise<Boolean>} - true se l'inizializzazione è avvenuta con successo
      */
-    async initializeResolver(userConfig) {
+    async initializeResolver(userConfig, pythonResolverInstance = null) {
+        const resolver = pythonResolverInstance || PythonResolver;
         if (!this.isResolverConfigured(userConfig)) {
             return false;
         }
 
         try {
             const resolverScriptUrl = userConfig.resolver_script;
-            
-            // Se l'URL è già stato impostato, non scaricare di nuovo lo script
-            if (PythonResolver.scriptUrl === resolverScriptUrl) {
-                // Verifica che lo script sia funzionante
-                const isHealthy = await PythonResolver.checkScriptHealth();
+            if (resolver.scriptUrl === resolverScriptUrl) {
+                const isHealthy = await resolver.checkScriptHealth();
                 return isHealthy;
             }
-            
-            // Scarica lo script
-            const downloaded = await PythonResolver.downloadScript(resolverScriptUrl);
+            const downloaded = await resolver.downloadScript(resolverScriptUrl);
             if (!downloaded) {
                 console.error('❌ Errore nel download dello script resolver');
                 return false;
             }
-            
-            // Verifica la salute dello script
-            const isHealthy = await PythonResolver.checkScriptHealth();
+            const isHealthy = await resolver.checkScriptHealth();
             if (!isHealthy) {
                 console.error('❌ Script resolver non valido');
                 return false;
             }
-            
-            // Imposta l'aggiornamento automatico se configurato
             if (userConfig.resolver_update_interval) {
-                PythonResolver.scheduleUpdate(userConfig.resolver_update_interval);
+                resolver.scheduleUpdate(userConfig.resolver_update_interval);
             }
-            
             return true;
         } catch (error) {
             console.error('❌ Errore nell\'inizializzazione del resolver:', error.message);
@@ -103,7 +94,8 @@ class ResolverStreamManager {
      * @param {Object} userConfig - Configurazione utente
      * @returns {Promise<Array>} - Array di stream risolti
      */
-    async getResolvedStreams(input, userConfig = {}) {
+    async getResolvedStreams(input, userConfig = {}, pythonResolverInstance = null) {
+        const resolver = pythonResolverInstance || PythonResolver;
         if (!this.isResolverConfigured(userConfig)) {
             console.log('Resolver non configurato per:', input.name);
             return [];
@@ -112,8 +104,7 @@ class ResolverStreamManager {
         let streams = [];
 
         try {
-            // Inizializza il resolver se necessario
-            await this.initializeResolver(userConfig);
+            await this.initializeResolver(userConfig, resolver);
             
             // Prepara la configurazione del proxy se disponibile
             let proxyConfig = null;
@@ -160,8 +151,7 @@ class ResolverStreamManager {
                             streamDetails.headers['Origin'] = origin;
                         }
                     }
-                    // Risolvi l'URL tramite lo script Python
-                    const result = await PythonResolver.resolveLink(
+                    const result = await resolver.resolveLink(
                         streamDetails.url, 
                         streamDetails.headers,
                         isChannel ? input.name : input.originalName || input.name,
@@ -233,16 +223,12 @@ class ResolverStreamManager {
     /**
      * Cancella la cache del resolver
      */
-    clearCache() {
-        PythonResolver.clearCache();
+    clearCache(pythonResolverInstance = null) {
+        (pythonResolverInstance || PythonResolver).clearCache();
     }
 
-    /**
-     * Ottiene lo stato del resolver
-     * @returns {Object} - Stato del resolver
-     */
-    getStatus() {
-        return PythonResolver.getStatus();
+    getStatus(pythonResolverInstance = null) {
+        return (pythonResolverInstance || PythonResolver).getStatus();
     }
 }
 
