@@ -1,5 +1,6 @@
 const config = require('./config');
 const PythonResolver = require('./python-resolver');
+const logger = require('./logger');
 
 function getLanguageFromConfig(userConfig) {
     return userConfig.language || config.defaultLanguage || 'Italiano';
@@ -26,7 +27,8 @@ class ResolverStreamManager {
      * @param {Object} userConfig - Configurazione utente
      * @returns {Promise<Boolean>} - true se l'inizializzazione è avvenuta con successo
      */
-    async initializeResolver(userConfig, pythonResolverInstance = null) {
+    async initializeResolver(userConfig, pythonResolverInstance = null, sessionKey = null) {
+        const sk = sessionKey || '_';
         const resolver = pythonResolverInstance || PythonResolver;
         if (!this.isResolverConfigured(userConfig)) {
             return false;
@@ -40,12 +42,12 @@ class ResolverStreamManager {
             }
             const downloaded = await resolver.downloadScript(resolverScriptUrl);
             if (!downloaded) {
-                console.error('❌ Errore nel download dello script resolver');
+                logger.error(sk, 'Resolver script download error');
                 return false;
             }
             const isHealthy = await resolver.checkScriptHealth();
             if (!isHealthy) {
-                console.error('❌ Script resolver non valido');
+                logger.error(sk, 'Resolver script invalid');
                 return false;
             }
             if (userConfig.resolver_update_interval) {
@@ -53,7 +55,7 @@ class ResolverStreamManager {
             }
             return true;
         } catch (error) {
-            console.error('❌ Errore nell\'inizializzazione del resolver:', error.message);
+            logger.error(sk, 'Resolver init error:', error.message);
             return false;
         }
     }
@@ -94,17 +96,18 @@ class ResolverStreamManager {
      * @param {Object} userConfig - Configurazione utente
      * @returns {Promise<Array>} - Array di stream risolti
      */
-    async getResolvedStreams(input, userConfig = {}, pythonResolverInstance = null) {
+    async getResolvedStreams(input, userConfig = {}, pythonResolverInstance = null, sessionKey = null) {
+        const sk = sessionKey || '_';
         const resolver = pythonResolverInstance || PythonResolver;
         if (!this.isResolverConfigured(userConfig)) {
-            console.log('Resolver non configurato per:', input.name);
+            logger.log(sk, 'Resolver not configured for:', input.name);
             return [];
         }
 
         let streams = [];
 
         try {
-            await this.initializeResolver(userConfig, resolver);
+            await this.initializeResolver(userConfig, resolver, sessionKey);
             
             // Prepara la configurazione del proxy se disponibile
             let proxyConfig = null;
@@ -160,7 +163,7 @@ class ResolverStreamManager {
 
                     // Se la risoluzione non produce un risultato, restituisci null
                     if (!result || !result.resolved_url) {
-                        console.log(`❌ Nessun risultato dal resolver per: ${streamDetails.name}`);
+                        logger.log(sk, 'No result from resolver for:', streamDetails.name);
                         return null;
                     }
                     
@@ -168,7 +171,7 @@ class ResolverStreamManager {
                     // Se l'URL è lo stesso (non è stato processato dal resolver perché non è Vavoo),
                     // restituisci comunque uno stream con l'URL originale
                     if (result.resolved_url === streamDetails.url) {
-                        console.log(`ℹ️ URL non modificato dal resolver per: ${streamDetails.name}, lo manteniamo`);
+                        logger.log(sk, 'URL unchanged by resolver for:', streamDetails.name, ', keeping it');
                         return {
                             name: `${input.originalName}`,
                             title: `📺 ${streamDetails.name} [${language.substring(0, 3).toUpperCase()}]`,
@@ -195,8 +198,8 @@ class ResolverStreamManager {
                         }
                     };
                 } catch (error) {
-                    console.error('Errore elaborazione stream:', error.message);
-                    return null; // Restituisci null per escludere questo stream
+                    logger.error(sk, 'Stream processing error:', error.message);
+                    return null;
                 }
             });
 
@@ -211,10 +214,10 @@ class ResolverStreamManager {
             return streams;
 
         } catch (error) {
-            console.error('Errore generale resolver:', error.message);
+            logger.error(sk, 'Resolver error:', error.message);
             if (error.response) {
-                console.error('Status:', error.response.status);
-                console.error('Headers:', error.response.headers);
+                logger.error(sk, 'Status:', error.response.status);
+                logger.error(sk, 'Headers:', error.response.headers);
             }
             return [];
         }

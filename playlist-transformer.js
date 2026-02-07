@@ -2,21 +2,23 @@ const axios = require('axios');
 const path = require('path');
 const fs = require('fs');
 const config = require('./config');
+const logger = require('./logger');
 
-async function readExternalFile(url) {
+async function readExternalFile(url, sessionKey = null) {
+  const sk = sessionKey || '_';
   try {
       const response = await axios.get(url);
       const content = response.data;
 
       if (content.trim().startsWith('#EXTM3U')) {
-          console.log('File M3U diretto trovato');
+          logger.log(sk, 'Direct M3U file found');
           return [url];
       }
 
-      console.log('File lista URL trovato');
+      logger.log(sk, 'URL list file found');
       return content.split('\n').filter(line => line.trim() !== '');
   } catch (error) {
-      console.error('Errore nella lettura del file:', error);
+      logger.error(sk, 'Error reading file:', error);
       throw error;
   }
 }
@@ -26,10 +28,12 @@ class PlaylistTransformer {
       this.remappingRules = new Map();
       this.channelsMap = new Map();
       this.channelsWithoutStreams = [];
+      this._logKey = '_';
   }
 
   normalizeId(id) {
-      return id?.toLowerCase().replace(/[^\w.]/g, '').trim() || '';
+      const beforeAt = (typeof id === 'string' && id.includes('@')) ? id.split('@')[0] : id;
+      return beforeAt?.toLowerCase().replace(/[^\w.]/g, '').trim() || '';
   }
 
   cleanChannelName(name) {
@@ -41,7 +45,7 @@ class PlaylistTransformer {
   }
 
   async loadRemappingRules(config) {
-      console.log('Remapper path:', config?.remapper_path);
+      logger.log(this._logKey, 'Remapper path:', config?.remapper_path);
       const defaultPath = path.join(__dirname, 'link.epg.remapping');
       const remappingPath = config?.remapper_path || defaultPath;
     
@@ -51,14 +55,14 @@ class PlaylistTransformer {
               try {
                   const response = await axios.get(remappingPath);
                   content = response.data;
-                  console.log('✓ Download remapping remoto completato');
+                  logger.log(this._logKey, 'Remote remapping download completed');
               } catch (downloadError) {
-                  console.error('❌ Download remoto fallito:', downloadError.message);
+                  logger.error(this._logKey, 'Remote download failed:', downloadError.message);
                   if (downloadError.response) {
-                      console.error('Status:', downloadError.response.status);
-                      console.error('Headers:', downloadError.response.headers);
+                      logger.error(this._logKey, 'Status:', downloadError.response.status);
+                      logger.error(this._logKey, 'Headers:', downloadError.response.headers);
                   }
-                  console.log('Uso fallback locale:', defaultPath);
+                  logger.log(this._logKey, 'Using local fallback:', defaultPath);
                   content = await fs.promises.readFile(defaultPath, 'utf8');
               }
           } else {
@@ -76,9 +80,9 @@ class PlaylistTransformer {
               }
           });
 
-          console.log(`✓ Caricate ${ruleCount} regole da ${remappingPath}`);
+          logger.log(this._logKey, 'Loaded', ruleCount, 'rules from', remappingPath);
       } catch (error) {
-          console.error('❌ Errore finale remapping:', error.message);
+          logger.error(this._logKey, 'Remapping error:', error.message);
       }
   }
 
@@ -89,7 +93,7 @@ class PlaylistTransformer {
       if (extinf.includes('tvg-name')) {
           const channelName = extinf.match(/tvg-name="([^"]+)"/) 
               ? extinf.match(/tvg-name="([^"]+)"/)[1]
-              : 'Canale sconosciuto';
+              : 'Unknown channel';
       }
       
       const extinfHeaders = {};
@@ -218,7 +222,7 @@ class PlaylistTransformer {
           poster: channel.tvg?.logo,
           background: channel.tvg?.logo,
           logo: channel.tvg?.logo,
-          description: `Canale: ${cleanName} - ID: ${finalChannelId}`,
+          description: `Channel: ${cleanName} - ID: ${finalChannelId}`,
           runtime: 'LIVE',
           behaviorHints: {
               defaultVideoId: `tv|${finalChannelId}`,
@@ -247,7 +251,7 @@ class PlaylistTransformer {
       if (url === null || url.toLowerCase() === 'null') {
           channel.streamInfo.urls.push({
               url: 'https://static.vecteezy.com/system/resources/previews/001/803/236/mp4/no-signal-bad-tv-free-video.mp4',
-              name: 'Nessuno flusso presente nelle playlist m3u',
+              name: 'No stream available in M3U playlists',
               headers
           });
       } else {
@@ -262,14 +266,14 @@ class PlaylistTransformer {
   async parseM3UContent(content, config) {
       const lines = content.split('\n');
       let currentChannel = null;
-      const genres = new Set(['Undefined']);
+      const genres = new Set();
   
       let epgUrl = null;
       if (lines[0].includes('url-tvg=')) {
           const match = lines[0].match(/url-tvg="([^"]+)"/);
           if (match) {
               epgUrl = match[1].split(',').map(url => url.trim());
-              console.log('URL EPG trovati nella playlist:', epgUrl);
+              logger.log(this._logKey, 'EPG URLs found in playlist:', epgUrl);
           }
       }
   
@@ -310,29 +314,20 @@ class PlaylistTransformer {
       }
 
       if (this.channelsWithoutStreams.length > 0) {
-          console.warn(`⚠️ Canali senza flussi riproducibili: ${this.channelsWithoutStreams.length}`);
-          console.log('\n=== Canali senza flussi ===');
-          this.channelsWithoutStreams.forEach(name => {
-              console.log(`${name}`);
-          });
-          console.log('========================\n');
+          logger.warn(this._logKey, 'Channels without playable streams:', this.channelsWithoutStreams.length);
+          logger.log(this._logKey, 'Channels without streams:', this.channelsWithoutStreams.join(', '));
       }
 
       const channelsWithOnlyDummy = [];
       for (const [id, channel] of this.channelsMap.entries()) {
           if (channel.streamInfo.urls.length === 1 && 
-              channel.streamInfo.urls[0].name === 'Nessuno flusso presente nelle playlist m3u') {
+              channel.streamInfo.urls[0].name === 'No stream available in M3U playlists') {
               channelsWithOnlyDummy.push(channel.name);
           }
       }
 
       if (channelsWithOnlyDummy.length > 0) {
-          console.log('\n=== Canali con solo flusso dummy ===');
-          channelsWithOnlyDummy.forEach(name => {
-              console.log(`${name}`);
-          });
-          console.log(`✓ Totale canali con solo flusso dummy: ${channelsWithOnlyDummy.length}`);
-          console.log('================================\n');
+          logger.log(this._logKey, 'Channels with dummy stream only:', channelsWithOnlyDummy.length, channelsWithOnlyDummy.join(', '));
       }
 
       return {
@@ -341,20 +336,19 @@ class PlaylistTransformer {
       };
   }
 
-  async loadAndTransform(url, config = {}) {
+  async loadAndTransform(url, config = {}, sessionKey = null) {
+      this._logKey = sessionKey || '_';
       try {
           await this.loadRemappingRules(config);
           
-          // Supporto per URL multipli separati da virgola
           const urlList = url.split(',').map(u => u.trim()).filter(u => u);
-          console.log('\n=== Inizio Processamento Playlist ===');
-          console.log('URL M3U forniti:', urlList.length);
+          logger.log(this._logKey, 'Playlist processing started, M3U URLs:', urlList.length);
           
           let playlistUrls = [];
           
           // Processa ogni URL fornito
           for (const singleUrl of urlList) {
-              console.log('Controllo URL:', singleUrl);
+              logger.log(this._logKey, 'Checking URL:', singleUrl);
               try {
                   const response = await axios.get(singleUrl);
                   const content = response.data;
@@ -362,26 +356,25 @@ class PlaylistTransformer {
                   if (content.startsWith('#EXTM3U')) {
                       // È un file M3U diretto
                       playlistUrls.push(singleUrl);
-                      console.log('✓ File M3U diretto trovato:', singleUrl);
+                      logger.log(this._logKey, 'Direct M3U file found:', singleUrl);
                   } else {
-                      // È una lista di URL
                       const urls = content.split('\n').filter(line => line.trim() && line.startsWith('http'));
                       playlistUrls.push(...urls);
-                      console.log('✓ Lista URL trovata, contiene', urls.length, 'playlist');
+                      logger.log(this._logKey, 'URL list found, contains', urls.length, 'playlist(s)');
                   }
               } catch (error) {
-                  console.error('❌ Errore nel processare URL:', singleUrl, error.message);
+                  logger.error(this._logKey, 'Error processing URL:', singleUrl, error.message);
                   // Continua con gli altri URL anche se uno fallisce
               }
           }
 
-          console.log('Playlist totali da processare:', playlistUrls.length);
+          logger.log(this._logKey, 'Total playlists to process:', playlistUrls.length);
 
           const allGenres = [];
           const allEpgUrls = new Set();
           
           for (const playlistUrl of playlistUrls) {
-              console.log('\nProcesso playlist:', playlistUrl);
+              logger.log(this._logKey, 'Processing playlist:', playlistUrl);
               const playlistResponse = await axios.get(playlistUrl);
               const result = await this.parseM3UContent(playlistResponse.data, config);
               
@@ -409,25 +402,19 @@ class PlaylistTransformer {
           finalResult.channels.forEach(channel => {
               if (channel.streamInfo.urls.length > 1) {
                   channel.streamInfo.urls = channel.streamInfo.urls.filter(
-                      stream => stream.name !== 'Nessuno flusso presente nelle playlist m3u'
+                      stream => stream.name !== 'No stream available in M3U playlists'
                   );
               }
           });
 
-          console.log('\nRiepilogo Processamento:');
-          console.log(`✓ Totale canali processati: ${finalResult.channels.length}`);
-          console.log(`✓ Totale generi trovati: ${finalResult.genres.length}`);
-          if (allEpgUrls.size > 0) {
-              console.log(`✓ URL EPG trovati: ${allEpgUrls.size}`);
-          }
-          console.log('=== Processamento Completato ===\n');
+          logger.log(this._logKey, 'Processing summary: channels', finalResult.channels.length, ', genres', finalResult.genres.length, allEpgUrls.size > 0 ? ', EPG URLs ' + allEpgUrls.size : '', '- completed');
 
           this.channelsMap.clear();
           this.channelsWithoutStreams = [];
           return finalResult;
 
       } catch (error) {
-          console.error('❌ Errore playlist:', error.message);
+          logger.error(this._logKey, 'Playlist error:', error.message);
           throw error;
       }
   }

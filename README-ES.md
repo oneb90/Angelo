@@ -33,6 +33,10 @@ Trabajar en este addon y mantenerlo actualizado ha costado muchísimas horas y m
 - **⏰ Caducidad de sesiones (24h)**: Si una sesión no recibe peticiones durante **24 horas**, caduca automáticamente: se elimina toda la caché de esa sesión (caché M3U, EPG, resolver, generador). En la siguiente petición con la misma config la sesión se recrea y los datos se rellenan desde las URL.
 
 ### 🔧 Mejoras
+- **⚙️ Sección Ajustes**: En el catálogo hay un filtro por género **⚙️** que agrupa los canales de utilidad: **Refresh M3U playlist**, **Refresh EPG** y **Rigenera Playlist Python**. Descripciones y mensajes en inglés.
+- **🔄 Pseudo-canales**: Al abrir un canal de la sección ⚙️ se ejecuta la acción (recargar playlist, actualizar EPG o regenerar Python) y se muestra un mensaje de resultado; no hay flujo de vídeo real.
+- **♻️ Caché al reiniciar**: Si la caché está vacía (p. ej. tras reiniciar Docker), la playlist y el EPG se reconstruyen automáticamente en la primera petición cuando hay URL M3U/EPG configurados.
+- **📺 EPG e ID de canales**: Mejor emparejamiento EPG para canales con sufijo (p. ej. `canale5.it` / `canale5`).
 - **🔒 Interfaz de protección**: Con la protección activa se ve la casilla y el botón «Modifica password»; los campos de contraseña y confirmación solo aparecen al pulsarlo.
 - **🔗 Vuelta tras el login**: Tras introducir la contraseña en la pantalla de acceso se redirige a la página desde la que se entró (p. ej. página de configuración con URL codificada).
 
@@ -202,8 +206,8 @@ Haz clic en un canal para ver:
 - Para evitar un duplicado, elimina el addon en Stremio
 - Vuelve a la página de configuración y haz clic en **Instalar en Stremio**
 
-### 🔧 Regeneración de lista de reproducción
-- Si has configurado un script Python, usa el canal especial **Regenerar Lista Python** para recrear la lista de reproducción
+### 🔧 Regeneración de lista y actualizaciones rápidas
+- En la sección **⚙️** (filtro por género del catálogo): **Refresh M3U playlist** (recargar desde la fuente), **Refresh EPG** (actualizar guía), **Rigenera Playlist Python** (ejecutar script y recargar). Abre el canal y sigue el mensaje en pantalla.
 
 ## 📋 Resumen de las principales funcionalidades
 

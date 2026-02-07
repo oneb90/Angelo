@@ -103,7 +103,7 @@ function loadCustomConfig() {
             return mergedConfig;
         }
     } catch (error) {
-        console.error('Errore nel caricare la configurazione personalizzata:', error);
+        console.error('Error loading custom configuration:', error);
     }
 
     return baseConfig;

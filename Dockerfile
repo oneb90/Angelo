@@ -17,7 +17,7 @@ RUN npm install
 # Copia il resto del codice
 COPY . .
 
-# Crea directory per i dati e imposta i permessi
+# Crea directory per i dati (cache M3U + EPG in memoria per sessione; nessuna persistenza)
 RUN mkdir -p /app/data && chown -R node:node /app/data
 
 # Crea la directory temp e imposta i permessi (come nel Dockerfile di Hugging Face)

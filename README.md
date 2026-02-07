@@ -33,6 +33,10 @@ Un caffè ☕ o una birra sono 🍺 un gesto di riconoscenza molto apprezzato e 
 - **⏰ Scadenza sessioni (24h)**: Se una sessione non riceve richieste per **24 ore**, scade automaticamente: tutta la cache di quella sessione (cache M3U, EPG, resolver, generatore) viene eliminata. Alla successiva richiesta con la stessa config la sessione viene ricreata e i dati ripopolati dagli URL.
 
 ### 🔧 Miglioramenti
+- **⚙️ Sezione Impostazioni**: Nel catalogo è presente un filtro per genere **⚙️** (impostazioni) che raggruppa i canali utility: **Refresh M3U playlist**, **Refresh EPG** e **Rigenera Playlist Python**. Descrizioni e messaggi in inglese.
+- **🔄 Pseudo-canali**: Aprendo un canale dalla sezione ⚙️ si esegue l’azione (ricarica playlist, aggiornamento EPG o rigenerazione Python) e si mostra un messaggio di esito; nessun flusso video reale.
+- **♻️ Cache al riavvio**: Se la cache è vuota (es. dopo riavvio Docker), la playlist e l’EPG vengono ricostruite automaticamente alla prima richiesta con URL M3U/EPG configurati.
+- **📺 EPG e ID canali**: Migliorato l’abbinamento EPG per canali con suffisso (es. `canale5.it` / `canale5`).
 - **🔒 UI protezione home**: Con protezione attiva si vede la spunta e il pulsante «Modifica password»; i campi password e conferma compaiono solo cliccando «Modifica password».
 - **🔗 Ritorno dopo login**: Dopo aver inserito la password sul gate si viene reindirizzati alla pagina da cui si era partiti (es. pagina di configurazione con URL codificato).
 
@@ -202,8 +206,8 @@ Clicca su un canale per vedere:
 - Onde evitare un doppione rimuovi l'addon su Stremio
 - Torna alla pagina di configurazione e clicca **Installa su Stremio**
 
-### 🔧 Rigenerazione playlist
-- Se hai configurato uno script Python, usa il canale speciale **Rigenera Playlist Python** per ricreare la playlist
+### 🔧 Rigenerazione playlist e aggiornamenti rapidi
+- Nella sezione **⚙️** (filtro per genere in catalogo) trovi: **Refresh M3U playlist** (ricarica dalla sorgente), **Refresh EPG** (aggiorna la guida programmi), **Rigenera Playlist Python** (esegue lo script e ricarica la playlist). Apri il canale e segui il messaggio a schermo.
 
 ## 📋 Riepilogo delle funzionalità principali
 

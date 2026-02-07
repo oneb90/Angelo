@@ -4,6 +4,7 @@ const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const logger = require('./logger');
 
 function safeSessionDbName(sessionId) {
     if (!sessionId || typeof sessionId !== 'string') return 'cache.db';
@@ -24,6 +25,10 @@ class CacheManager extends EventEmitter {
         this.dbPath = path.join(__dirname, 'data', safeSessionDbName(sessionId));
     }
 
+    _sk() {
+        return (this.sessionKey != null ? this.sessionKey : this.sessionId) || '_';
+    }
+
     async initializeDatabase() {
         try {
             // Crea directory data se non esiste
@@ -39,10 +44,10 @@ class CacheManager extends EventEmitter {
             if (fs.existsSync(this.dbPath)) {
                 const buffer = fs.readFileSync(this.dbPath);
                 this.db = new SQL.Database(buffer);
-                console.log('✓ Database cache caricato da disco');
+                logger.log(this._sk(), 'Cache database loaded from disk');
             } else {
                 this.db = new SQL.Database();
-                console.log('✓ Nuovo database cache creato');
+                logger.log(this._sk(), 'New cache database created');
             }
 
             // Crea schema
@@ -62,9 +67,9 @@ class CacheManager extends EventEmitter {
                 );
             `);
 
-            console.log('✓ Schema database cache inizializzato');
+            logger.log(this._sk(), 'Cache database schema initialized');
         } catch (error) {
-            console.error('❌ Errore inizializzazione database cache:', error);
+            logger.error(this._sk(), 'Cache database init error:', error);
         }
     }
 
@@ -74,7 +79,7 @@ class CacheManager extends EventEmitter {
             const buffer = Buffer.from(data);
             fs.writeFileSync(this.dbPath, buffer);
         } catch (error) {
-            console.error('❌ Errore salvataggio database cache:', error);
+            logger.error(this._sk(), 'Cache database save error:', error);
         }
     }
 
@@ -98,7 +103,7 @@ class CacheManager extends EventEmitter {
                         const channelData = JSON.parse(row[1]);
                         channels.push(channelData);
                     } catch (e) {
-                        console.error('Errore parsing canale:', row[0], e);
+                        logger.error(this._sk(), 'Channel parse error:', row[0], e);
                     }
                 });
             }
@@ -121,9 +126,11 @@ class CacheManager extends EventEmitter {
                 epgUrls: metadata.epgUrls ? JSON.parse(metadata.epgUrls) : []
             };
 
-            console.log(`✓ Caricati ${channels.length} canali e ${genres.length} generi dal database`);
+            if (channels.length > 0 || genres.length > 0) {
+                logger.log(this._sk(), 'Loaded', channels.length, 'channels and', genres.length, 'genres from database');
+            }
         } catch (error) {
-            console.error('❌ Errore caricamento cache dal database:', error);
+            logger.error(this._sk(), 'Cache load from database error:', error);
             this.initCache();
         }
     }
@@ -151,7 +158,7 @@ class CacheManager extends EventEmitter {
                     try {
                         stmt.run([channel.id, JSON.stringify(channel)]);
                     } catch (e) {
-                        console.error('Errore salvataggio canale:', channel.id, e);
+                        logger.error(this._sk(), 'Channel save error:', channel.id, e);
                     }
                 });
                 stmt.free();
@@ -170,9 +177,9 @@ class CacheManager extends EventEmitter {
             }
 
             this.saveDatabase();
-            console.log('✓ Cache salvata nel database');
+            logger.log(this._sk(), 'Cache saved to database');
         } catch (error) {
-            console.error('❌ Errore salvataggio cache nel database:', error);
+            logger.error(this._sk(), 'Cache save to database error:', error);
         }
     }
 
@@ -185,6 +192,12 @@ class CacheManager extends EventEmitter {
             epgUrls: []
         };
         this.lastFilter = null;
+    }
+
+    ensureCacheLoaded() {
+        if (this._cacheLoaded) return;
+        this._cacheLoaded = true;
+        this.loadCacheFromDB();
     }
 
     async updateConfig(newConfig) {
@@ -204,7 +217,7 @@ class CacheManager extends EventEmitter {
         this.config = { ...this.config, ...newConfig };
 
         if (hasM3UChanges) {
-            console.log('Playlist M3U modificata, ricarico solo i dati della playlist...');
+            logger.log(this._sk(), 'M3U playlist changed, reloading playlist data...');
             // Resetta solo i dati della playlist
             this.cache.stremioData = null;
             this.cache.m3uUrl = null;
@@ -215,12 +228,12 @@ class CacheManager extends EventEmitter {
         }
 
         if (hasEPGChanges) {
-            console.log('Configurazione EPG modificata, aggiorno solo EPG...');
+            logger.log(this._sk(), 'EPG config changed, updating EPG only...');
             // Non tocchiamo i dati della playlist, lasciamo gestire l'EPG all'EPGManager
         }
 
         if (hasOtherChanges) {
-            console.log('Altre configurazioni modificate, riavvio polling...');
+            logger.log(this._sk(), 'Other config changed, restarting polling...');
             this.startPolling();
         }
     }
@@ -239,18 +252,19 @@ class CacheManager extends EventEmitter {
             }
 
             if (this.isStale(this.config)) {
-                console.log('Controllo aggiornamento cache...');
+                logger.log(this._sk(), 'Checking cache update...');
                 try {
                     await this.rebuildCache(this.cache.m3uUrl, this.config);
                 } catch (error) {
-                    console.error('Errore durante l\'aggiornamento automatico:', error);
+                    logger.error(this._sk(), 'Auto-update error:', error);
                 }
             }
         }, 60000); // 60 secondi
     }
 
     normalizeId(id, removeSuffix = false) {
-        let normalized = id?.toLowerCase().replace(/[^\w.]/g, '').trim() || '';
+        const beforeAt = (typeof id === 'string' && id.includes('@')) ? id.split('@')[0] : id;
+        let normalized = beforeAt?.toLowerCase().replace(/[^\w.]/g, '').trim() || '';
 
         if (removeSuffix && this.config?.id_suffix) {
             const suffix = `.${this.config.id_suffix}`;
@@ -270,20 +284,19 @@ class CacheManager extends EventEmitter {
 
     async rebuildCache(m3uUrl, config) {
         if (this.cache.updateInProgress) {
-            console.log('⚠️  Ricostruzione cache già in corso, skip...');
+            logger.log(this._sk(), 'Cache rebuild already in progress, skip');
             return;
         }
 
         try {
             this.cache.updateInProgress = true;
-            console.log('\n=== Inizio Ricostruzione Cache ===');
-            console.log('URL M3U:', m3uUrl);
+            logger.log(this._sk(), 'Cache rebuild started, M3U URL:', m3uUrl);
 
             if (config) {
                 this.config = { ...this.config, ...config };
             }
 
-            const data = await this.transformer.loadAndTransform(m3uUrl, this.config);
+            const data = await this.transformer.loadAndTransform(m3uUrl, this.config, this._sk());
 
             this.cache = {
                 stremioData: data,
@@ -292,10 +305,9 @@ class CacheManager extends EventEmitter {
                 m3uUrl: m3uUrl,
                 epgUrls: data.epgUrls
             };
+            this._cacheLoaded = true;
 
-            console.log(`✓ Canali in cache: ${data.channels.length}`);
-            console.log(`✓ Generi trovati: ${data.genres.length}`);
-            console.log('\n=== Cache Ricostruita ===\n');
+            logger.log(this._sk(), 'Channels in cache:', data.channels.length, ', genres:', data.genres.length, ', cache rebuilt');
 
             // Salva nel database
             this.saveCacheToDB();
@@ -303,7 +315,7 @@ class CacheManager extends EventEmitter {
             this.emit('cacheUpdated', this.cache);
 
         } catch (error) {
-            console.error('\n❌ ERRORE nella ricostruzione della cache:', error);
+            logger.error(this._sk(), 'Cache rebuild error:', error);
             this.cache.updateInProgress = false;
             this.emit('cacheError', error);
             throw error;
@@ -311,6 +323,7 @@ class CacheManager extends EventEmitter {
     }
 
     getCachedData() {
+        this.ensureCacheLoaded();
         if (!this.cache || !this.cache.stremioData) return { channels: [], genres: [] };
         return {
             channels: this.cache.stremioData.channels,
@@ -319,6 +332,7 @@ class CacheManager extends EventEmitter {
     }
 
     getChannel(channelId) {
+        this.ensureCacheLoaded();
         if (!channelId || !this.cache?.stremioData?.channels) return null;
         const normalizedSearchId = this.normalizeId(channelId);
 
@@ -340,16 +354,21 @@ class CacheManager extends EventEmitter {
     }
 
     getChannelsByGenre(genre) {
+        this.ensureCacheLoaded();
         if (!genre || !this.cache?.stremioData?.channels) return [];
 
         return this.cache.stremioData.channels.filter(channel => {
             if (!Array.isArray(channel.genre)) return false;
             const hasGenre = channel.genre.includes(genre);
-            return hasGenre;
+            if (hasGenre) return true;
+            const isSettingsGenre = genre === '⚙️' || genre === 'Settings';
+            if (isSettingsGenre && (channel.genre.includes('~SETTINGS~') || channel.genre.includes('Settings'))) return true;
+            return false;
         });
     }
 
     searchChannels(query) {
+        this.ensureCacheLoaded();
         if (!this.cache?.stremioData?.channels) return [];
         if (!query) return this.cache.stremioData.channels;
 
@@ -362,6 +381,7 @@ class CacheManager extends EventEmitter {
     }
 
     isStale(config = {}) {
+        this.ensureCacheLoaded();
         if (!this.cache || !this.cache.lastUpdated || !this.cache.stremioData) return true;
 
         let updateIntervalMs = 12 * 60 * 60 * 1000;
@@ -376,10 +396,10 @@ class CacheManager extends EventEmitter {
                 if (hours >= 0 && hours < 24 && minutes >= 0 && minutes < 60) {
                     updateIntervalMs = (hours * 60 * 60 + minutes * 60) * 1000;
                 } else {
-                    console.warn('Formato ora non valido, uso valore predefinito');
+                    logger.warn(this._sk(), 'Invalid time format, using default value');
                 }
             } else {
-                console.warn('Formato ora non valido, uso valore predefinito');
+                logger.warn(this._sk(), 'Invalid time format, using default value');
             }
         }
 
@@ -387,7 +407,7 @@ class CacheManager extends EventEmitter {
 
         const needsUpdate = timeSinceLastUpdate >= updateIntervalMs;
         if (needsUpdate) {
-            console.log('Cache obsoleta, necessario aggiornamento');
+            logger.log(this._sk(), 'Cache stale, update needed');
         }
 
         return needsUpdate;
@@ -406,6 +426,7 @@ class CacheManager extends EventEmitter {
     }
 
     getFilteredChannels() {
+        this.ensureCacheLoaded();
         if (!this.cache?.stremioData?.channels) return [];
 
         let channels = this.cache.stremioData.channels;
@@ -437,10 +458,10 @@ class CacheManager extends EventEmitter {
         try {
             if (this.dbPath && fs.existsSync(this.dbPath)) {
                 fs.unlinkSync(this.dbPath);
-                console.log('✓ Cache sessione rimossa:', this.dbPath);
+                console.log('Session cache removed:', this.dbPath);
             }
         } catch (e) {
-            console.error('Errore rimozione cache sessione:', e.message);
+            logger.error(this._sk(), 'Session cache removal error:', e.message);
         }
         this.db = null;
         this.cache = null;
@@ -450,7 +471,8 @@ class CacheManager extends EventEmitter {
 module.exports = async (config, sessionId) => {
     const instance = new CacheManager(sessionId);
     await instance.initializeDatabase();
-    instance.loadCacheFromDB();
+    instance._cacheLoaded = false;
+    instance.initCache();
     instance.config = config;
     instance.startPolling();
     return instance;

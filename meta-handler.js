@@ -1,24 +1,24 @@
 const config = require('./config');
+const logger = require('./logger');
 
 function normalizeId(id) {
-    return id?.toLowerCase().replace(/[^\w.]/g, '').trim() || '';
+    const beforeAt = (typeof id === 'string' && id.includes('@')) ? id.split('@')[0] : id;
+    return beforeAt?.toLowerCase().replace(/[^\w.]/g, '').trim() || '';
 }
 
 function enrichWithDetailedEPG(meta, channelId, userConfig, epgManager) {
     const epg = epgManager || require('./epg-manager');
-    if (!userConfig.epg_enabled) {
-        console.log('❌ EPG non abilitato');
+    if (userConfig.epg_enabled !== 'true' || !channelId) {
         return meta;
     }
-
-    const normalizedId = normalizeId(channelId);
-    const currentProgram = epg.getCurrentProgram(normalizedId);
-    const upcomingPrograms = epg.getUpcomingPrograms(normalizedId);
+    // Passa channelId così getLookupIds in epg-manager può provare sia "canale5.it" sia "canale5"
+    const currentProgram = epg.getCurrentProgram(channelId);
+    const upcomingPrograms = epg.getUpcomingPrograms(channelId);
 
     if (currentProgram) {
         let description = [];
 
-        description.push('📺 IN ONDA ORA:', currentProgram.title);
+        description.push('📺 ON AIR NOW:', currentProgram.title);
 
         if (currentProgram.description) {
             description.push('', currentProgram.description);
@@ -31,7 +31,7 @@ function enrichWithDetailedEPG(meta, channelId, userConfig, epgManager) {
         }
 
         if (upcomingPrograms?.length > 0) {
-            description.push('', '📅 PROSSIMI PROGRAMMI:');
+            description.push('', '📅 UPCOMING PROGRAMS:');
             upcomingPrograms.forEach(program => {
                 description.push(
                     '',
@@ -54,28 +54,54 @@ function enrichWithDetailedEPG(meta, channelId, userConfig, epgManager) {
     return meta;
 }
 
+const PSEUDO_CHANNEL_IDS = ['rigeneraplaylistpython', 'refreshm3u', 'refreshepg'];
+const PSEUDO_META = {
+    refreshm3u: { name: 'Refresh M3U playlist', description: 'Reload the M3U playlist from the configured source. Go back and reopen the catalog to see changes.' },
+    refreshepg: { name: 'Refresh EPG', description: 'Update the program guide (EPG) from the configured source. Go back and reopen the catalog to see changes.' },
+    rigeneraplaylistpython: { name: 'Regenerate Python playlist', description: 'Run the Python script to regenerate the playlist. Go back and reopen the catalog to see changes.' }
+};
+const SETTINGS_LOGO = 'https://raw.githubusercontent.com/mccoy88f/OMG-TV-Stremio-Addon/refs/heads/main/tv.png';
+
 async function metaHandler({ type, id, config: userConfig, cacheManager: cm, epgManager: em }) {
     const cacheManager = cm || global.CacheManager;
     const epgManager = em || require('./epg-manager');
     try {
+        const channelId = (typeof id === 'string' && id.includes('|')) ? id.split('|')[1] : (id || '');
+
+        if (PSEUDO_CHANNEL_IDS.includes(channelId)) {
+            const info = PSEUDO_META[channelId] || { name: channelId, description: '' };
+            const fullId = id && id.includes('|') ? id : `tv|${channelId}`;
+            return {
+                meta: {
+                    id: fullId,
+                    type: 'tv',
+                    name: info.name,
+                    poster: SETTINGS_LOGO,
+                    background: SETTINGS_LOGO,
+                    logo: SETTINGS_LOGO,
+                    description: info.description,
+                    releaseInfo: 'LIVE',
+                    posterShape: 'square',
+                    behaviorHints: { isLive: true, defaultVideoId: fullId }
+                }
+            };
+        }
 
         if (!userConfig.m3u) {
-            console.log('❌ URL M3U mancante');
+            logger.log(cacheManager?.sessionKey ?? '_', 'M3U URL missing');
             return { meta: null };
         }
 
+        cacheManager.ensureCacheLoaded();
         if (cacheManager.cache.m3uUrl !== userConfig.m3u) {
-            console.log('Cache M3U non aggiornata, ricostruzione...');
+            logger.log(cacheManager?.sessionKey ?? '_', 'M3U cache outdated, rebuilding...');
             await cacheManager.rebuildCache(userConfig.m3u, userConfig);
         }
-
-        const channelId = id.split('|')[1];
 
         // Usa direttamente getChannel dalla cache, che ora gestisce correttamente i suffissi
         const channel = cacheManager.getChannel(channelId);
 
         if (!channel) {
-            console.log('=== Fine Meta Handler ===\n');
             return { meta: null };
         }
 
@@ -116,24 +142,23 @@ async function metaHandler({ type, id, config: userConfig, cacheManager: cm, epg
         let baseDescription = [];
 
         if (channel.streamInfo?.tvg?.chno) {
-            baseDescription.push(`📺 Canale ${channel.streamInfo.tvg.chno}`);
+            baseDescription.push(`📺 Channel ${channel.streamInfo.tvg.chno}`);
         }
 
         if (channel.description) {
             baseDescription.push('', channel.description);
         } else {
-            baseDescription.push('', `ID Canale: ${channel.streamInfo?.tvg?.id}`);
+            baseDescription.push('', `Channel ID: ${channel.streamInfo?.tvg?.id}`);
         }
 
         meta.description = baseDescription.join('\n');
 
         const enrichedMeta = enrichWithDetailedEPG(meta, channel.streamInfo?.tvg?.id, userConfig, epgManager);
 
-        console.log('✓ Meta handler completato');
+        logger.log(cacheManager?.sessionKey ?? '_', 'Meta handler completed');
         return { meta: enrichedMeta };
     } catch (error) {
-        console.error('[MetaHandler] Errore:', error.message);
-        console.log('=== Fine Meta Handler con Errore ===\n');
+        logger.error(cacheManager?.sessionKey ?? '_', 'MetaHandler error:', error.message);
         return { meta: null };
     }
 }

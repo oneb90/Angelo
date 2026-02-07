@@ -1,3 +1,5 @@
+const { I18N } = require('./views-i18n');
+
 /**
  * Restituisce tutto il codice JavaScript per i controlli della pagina di configurazione
  * @param {string} protocol - Il protocollo HTTP/HTTPS in uso
@@ -5,7 +7,38 @@
  * @returns {string} - Codice JavaScript da inserire nel template
  */
 const getViewScripts = (protocol, host) => {
+    const i18nJson = JSON.stringify(I18N).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
     return `
+        window.I18N = ${i18nJson};
+        window.currentLang = localStorage.getItem('omg_tv_lang') || 'en';
+        window.t = function(key) {
+            var L = window.I18N[window.currentLang] || window.I18N.en;
+            return (L && L[key]) || (window.I18N.en && window.I18N.en[key]) || key;
+        };
+        window.applyLanguage = function(lang) {
+            window.currentLang = lang || 'en';
+            document.querySelectorAll('[data-i18n]').forEach(function(el) {
+                var key = el.getAttribute('data-i18n');
+                var v = window.I18N[lang] && window.I18N[lang][key];
+                if (v) {
+                    if (el.getAttribute('data-i18n-value') && el.value !== undefined) el.value = v;
+                    else if (el.placeholder === undefined) el.textContent = v;
+                }
+            });
+            document.querySelectorAll('[data-i18n-placeholder]').forEach(function(el) {
+                var v = window.I18N[lang] && window.I18N[lang][el.getAttribute('data-i18n-placeholder')];
+                if (v) el.placeholder = v;
+            });
+            var enBtn = document.getElementById('langEn');
+            var itBtn = document.getElementById('langIt');
+            if (enBtn) { enBtn.style.fontWeight = lang === 'en' ? 'bold' : 'normal'; enBtn.style.textDecoration = lang === 'en' ? 'underline' : 'none'; }
+            if (itBtn) { itBtn.style.fontWeight = lang === 'it' ? 'bold' : 'normal'; itBtn.style.textDecoration = lang === 'it' ? 'underline' : 'none'; }
+        };
+        window.setLanguage = function(lang) {
+            localStorage.setItem('omg_tv_lang', lang);
+            window.applyLanguage(lang);
+        };
+
         // Funzioni per le sezioni espandibili
         function toggleAdvancedSettings() {
             const content = document.getElementById('advanced-settings-content');
@@ -26,6 +59,24 @@ const getViewScripts = (protocol, host) => {
             const toggle = document.getElementById('resolver-section-toggle');
             content.classList.toggle('show');
             toggle.textContent = content.classList.contains('show') ? '▲' : '▼';
+        }
+
+        function toggleSessionDetails() {
+            const content = document.getElementById('session-details-content');
+            const toggle = document.getElementById('session-details-toggle');
+            if (content && toggle) {
+                content.classList.toggle('show');
+                toggle.textContent = content.classList.contains('show') ? '▲' : '▼';
+            }
+        }
+
+        function toggleSecuritySection() {
+            const content = document.getElementById('security-section-content');
+            const toggle = document.getElementById('security-section-toggle');
+            if (content && toggle) {
+                content.classList.toggle('show');
+                toggle.textContent = content.classList.contains('show') ? '▲' : '▼';
+            }
         }
 
         // Proteggi accesso alla home
@@ -69,12 +120,12 @@ const getViewScripts = (protocol, host) => {
             const confirm = document.getElementById('homeAuthConfirm').value;
             const msg = document.getElementById('homeAuthMessage');
             if (enabled && password !== confirm) {
-                msg.textContent = 'Le password non coincidono';
+                msg.textContent = t('auth_pwd_mismatch');
                 msg.style.color = '#f44336';
                 return;
             }
             if (enabled && password.length < 1) {
-                msg.textContent = 'Inserisci una password';
+                msg.textContent = t('auth_enter_pwd');
                 msg.style.color = '#f44336';
                 return;
             }
@@ -84,7 +135,7 @@ const getViewScripts = (protocol, host) => {
                 body: JSON.stringify({ enabled: enabled, password: password, confirm: confirm })
             }).then(function(r) { return r.json(); }).then(function(data) {
                 if (data.success) {
-                    msg.textContent = enabled ? 'Protezione attivata.' : 'Protezione disattivata.';
+                    msg.textContent = enabled ? t('auth_protection_on') : t('auth_protection_off');
                     msg.style.color = '#4CAF50';
                     document.getElementById('homeAuthPassword').value = '';
                     document.getElementById('homeAuthConfirm').value = '';
@@ -95,17 +146,34 @@ const getViewScripts = (protocol, host) => {
                         document.getElementById('homeAuthWhenEnabled').style.display = 'none';
                     }
                 } else {
-                    msg.textContent = data.message || 'Errore';
+                    msg.textContent = data.message || t('auth_error');
                     msg.style.color = '#f44336';
                 }
             }).catch(function() {
-                msg.textContent = 'Errore di rete';
+                msg.textContent = t('auth_network_error');
                 msg.style.color = '#f44336';
             });
         }
 
-        // Funzioni per la gestione della configurazione
+        // Sync resolver section fields (outside form) to hidden form inputs
+        function syncResolverFieldsToForm() {
+            const urlEl = document.getElementById('resolverScriptUrl');
+            const enEl = document.getElementById('resolverEnabled');
+            const hUrl = document.getElementById('hidden_resolver_script');
+            const hEn = document.getElementById('hidden_resolver_enabled');
+            if (urlEl && hUrl) hUrl.value = urlEl.value;
+            if (enEl && hEn) hEn.value = enEl.checked ? 'true' : 'false';
+        }
+        function syncFormToResolverFields() {
+            const hUrl = document.getElementById('hidden_resolver_script');
+            const hEn = document.getElementById('hidden_resolver_enabled');
+            const urlEl = document.getElementById('resolverScriptUrl');
+            const enEl = document.getElementById('resolverEnabled');
+            if (hUrl && urlEl) urlEl.value = hUrl.value;
+            if (hEn && enEl) enEl.checked = hEn.value === 'true';
+        }
         function getConfigQueryString() {
+            syncResolverFieldsToForm();
             const form = document.getElementById('configForm');
             const formData = new FormData(form);
             const params = new URLSearchParams();
@@ -113,7 +181,8 @@ const getViewScripts = (protocol, host) => {
             formData.forEach((value, key) => {
                 if (value || key === 'epg_enabled' || key === 'force_proxy' || key === 'resolver_enabled') {
                     if (key === 'epg_enabled' || key === 'force_proxy' || key === 'resolver_enabled') {
-                        params.append(key, form.elements[key].checked);
+                        const el = form.elements[key];
+                        params.append(key, el && el.type === 'checkbox' ? el.checked : value);
                     } else {
                         params.append(key, value);
                     }
@@ -127,6 +196,70 @@ const getViewScripts = (protocol, host) => {
             const qs = getConfigQueryString();
             return Object.fromEntries(new URLSearchParams(qs));
         }
+
+        // Preset countries: iptv-org playlist + iptv-epg.org EPG (ISO 3166-1 alpha-2 lowercase). Names in English for default UI.
+        var PRESET_COUNTRIES = [
+            { name: 'Albania', code: 'al' }, { name: 'Argentina', code: 'ar' }, { name: 'Armenia', code: 'am' },
+            { name: 'Australia', code: 'au' }, { name: 'Austria', code: 'at' }, { name: 'Belarus', code: 'by' },
+            { name: 'Belgium', code: 'be' }, { name: 'Bolivia', code: 'bo' }, { name: 'Bosnia and Herzegovina', code: 'ba' },
+            { name: 'Brazil', code: 'br' }, { name: 'Bulgaria', code: 'bg' }, { name: 'Canada', code: 'ca' },
+            { name: 'Chile', code: 'cl' }, { name: 'Colombia', code: 'co' }, { name: 'Costa Rica', code: 'cr' },
+            { name: 'Croatia', code: 'hr' }, { name: 'Czech Republic', code: 'cz' }, { name: 'Denmark', code: 'dk' },
+            { name: 'Dominican Republic', code: 'do' }, { name: 'Ecuador', code: 'ec' }, { name: 'Egypt', code: 'eg' },
+            { name: 'El Salvador', code: 'sv' }, { name: 'Finland', code: 'fi' }, { name: 'France', code: 'fr' },
+            { name: 'Georgia', code: 'ge' }, { name: 'Germany', code: 'de' }, { name: 'Ghana', code: 'gh' },
+            { name: 'Greece', code: 'gr' }, { name: 'Guatemala', code: 'gt' }, { name: 'Honduras', code: 'hn' },
+            { name: 'Hong Kong', code: 'hk' }, { name: 'Hungary', code: 'hu' }, { name: 'Iceland', code: 'is' },
+            { name: 'India', code: 'in' }, { name: 'Indonesia', code: 'id' }, { name: 'Israel', code: 'il' },
+            { name: 'Italy', code: 'it' }, { name: 'Japan', code: 'jp' }, { name: 'Latvia', code: 'lv' },
+            { name: 'Lebanon', code: 'lb' }, { name: 'Lithuania', code: 'lt' }, { name: 'Luxembourg', code: 'lu' },
+            { name: 'North Macedonia', code: 'mk' }, { name: 'Malaysia', code: 'my' }, { name: 'Malta', code: 'mt' },
+            { name: 'Mexico', code: 'mx' }, { name: 'Montenegro', code: 'me' }, { name: 'Netherlands', code: 'nl' },
+            { name: 'New Zealand', code: 'nz' }, { name: 'Nicaragua', code: 'ni' }, { name: 'Nigeria', code: 'ng' },
+            { name: 'Norway', code: 'no' }, { name: 'Panama', code: 'pa' }, { name: 'Paraguay', code: 'py' },
+            { name: 'Peru', code: 'pe' }, { name: 'Philippines', code: 'ph' }, { name: 'Poland', code: 'pl' },
+            { name: 'Portugal', code: 'pt' }, { name: 'Romania', code: 'ro' }, { name: 'Russia', code: 'ru' },
+            { name: 'Saudi Arabia', code: 'sa' }, { name: 'Serbia', code: 'rs' }, { name: 'Singapore', code: 'sg' },
+            { name: 'Slovenia', code: 'si' }, { name: 'South Africa', code: 'za' }, { name: 'South Korea', code: 'kr' },
+            { name: 'Spain', code: 'es' }, { name: 'Sweden', code: 'se' }, { name: 'Switzerland', code: 'ch' },
+            { name: 'Taiwan', code: 'tw' }, { name: 'Thailand', code: 'th' }, { name: 'Turkey', code: 'tr' },
+            { name: 'Uganda', code: 'ug' }, { name: 'Ukraine', code: 'ua' }, { name: 'United Arab Emirates', code: 'ae' },
+            { name: 'United Kingdom', code: 'gb' }, { name: 'United States', code: 'us' }, { name: 'Uruguay', code: 'uy' },
+            { name: 'Venezuela', code: 've' }, { name: 'Vietnam', code: 'vn' }, { name: 'Zimbabwe', code: 'zw' }
+        ];
+
+        function applyPresetCountry() {
+            var sel = document.getElementById('presetCountry');
+            if (!sel || !sel.value) return;
+            var code = sel.value.toLowerCase();
+            var m3uInput = document.querySelector('input[name="m3u"]');
+            var epgInput = document.querySelector('input[name="epg"]');
+            var epgCheck = document.querySelector('input[name="epg_enabled"]');
+            if (m3uInput && !m3uInput.readOnly) {
+                m3uInput.value = 'https://iptv-org.github.io/iptv/countries/' + code + '.m3u';
+            }
+            if (epgInput) {
+                epgInput.value = 'https://iptv-epg.org/files/epg-' + code + '.xml';
+            }
+            if (epgCheck) epgCheck.checked = true;
+        }
+
+        function flagFromCode(code) {
+            if (!code || code.length !== 2) return '';
+            return code.toUpperCase().split('').map(function(c) {
+                return String.fromCodePoint(0x1F1E6 + c.charCodeAt(0) - 65);
+            }).join('');
+        }
+        (function initPresetCountrySelect() {
+            var sel = document.getElementById('presetCountry');
+            if (!sel) return;
+            PRESET_COUNTRIES.forEach(function(c) {
+                var opt = document.createElement('option');
+                opt.value = c.code;
+                opt.textContent = flagFromCode(c.code) + ' ' + c.name;
+                sel.appendChild(opt);
+            });
+        })();
 
         async function updateSessionIdDisplay() {
             const el = document.getElementById('sessionIdDisplay');
@@ -167,7 +300,7 @@ const getViewScripts = (protocol, host) => {
             e.preventDefault();
             const configQueryString = getConfigQueryString();
             const configBase64 = btoa(configQueryString);
-            window.location.href = \`${protocol}://${host}/\${configBase64}/configure\`;
+            window.location.href = \`${protocol}://${host}/\${configBase64}/configure?generated=1\`;
         }
 
         function copyManifestUrl() {
@@ -218,7 +351,7 @@ const getViewScripts = (protocol, host) => {
             const file = event.target.files[0];
             if (!file) return;
         
-            showLoader('Ripristino configurazione in corso...');
+            showLoader(t('loader_restore'));
             
             const reader = new FileReader();
             reader.onload = async function(e) {
@@ -237,6 +370,7 @@ const getViewScripts = (protocol, host) => {
                             }
                         }
                     }
+                    syncFormToResolverFields();
                     updateSessionIdDisplay();
 
                     if (config.resolver_update_interval) {
@@ -287,7 +421,7 @@ const getViewScripts = (protocol, host) => {
         
                         const downloadData = await downloadResponse.json();
                         if (!downloadData.success) {
-                            throw new Error('Download dello script fallito');
+                            throw new Error(t('error_script_download'));
                         }
         
                         // Esegui lo script Python
@@ -307,7 +441,7 @@ const getViewScripts = (protocol, host) => {
                             throw new Error('Esecuzione dello script fallita');
                         }
         
-                        alert('Script Python scaricato ed eseguito con successo!');
+                        alert(t('success_script_executed'));
                         showM3uUrl(executeData.m3uUrl);
                     }
         
@@ -342,13 +476,13 @@ const getViewScripts = (protocol, host) => {
                             
                             const rebuildResult = await rebuildResponse.json();
                             if (rebuildResult.success) {
-                                alert('Configurazione ripristinata e ricostruzione cache avviata!');
+                                alert(t('success_config_restored'));
                             } else {
-                                alert('Configurazione ripristinata ma errore nella ricostruzione: ' + rebuildResult.message);
+                                alert(t('success_config_restored_rebuild_fail') + rebuildResult.message);
                             }
                         } catch (rebuildError) {
-                            console.error('Errore rebuild:', rebuildError);
-                            alert('Configurazione ripristinata ma errore nella ricostruzione della cache');
+                            console.error('Rebuild error:', rebuildError);
+                            alert(t('success_config_restored_rebuild_error'));
                         }
                     }
         
@@ -361,8 +495,8 @@ const getViewScripts = (protocol, host) => {
         
                 } catch (error) {
                     hideLoader();
-                    console.error('Errore:', error);
-                    alert('Errore nel caricamento del file di configurazione: ' + error.message);
+                    console.error('Error:', error);
+                    alert(t('error_load_config') + error.message);
                 }
             };
             reader.readAsText(file);
@@ -376,21 +510,21 @@ const getViewScripts = (protocol, host) => {
             statusEl.style.display = 'block';
             
             let html = '<table style="width: 100%; text-align: left;">';
-            html += '<tr><td><strong>In Esecuzione:</strong></td><td>' + (data.isRunning ? 'Sì' : 'No') + '</td></tr>';
-            html += '<tr><td><strong>Ultima Esecuzione:</strong></td><td>' + data.lastExecution + '</td></tr>';
-            html += '<tr><td><strong>Script Esistente:</strong></td><td>' + (data.scriptExists ? 'Sì' : 'No') + '</td></tr>';
-            html += '<tr><td><strong>File M3U Esistente:</strong></td><td>' + (data.m3uExists ? 'Sì' : 'No') + '</td></tr>';
+            html += '<tr><td><strong>' + t('running') + ':</strong></td><td>' + (data.isRunning ? t('yes') : t('no')) + '</td></tr>';
+            html += '<tr><td><strong>' + t('last_run') + ':</strong></td><td>' + data.lastExecution + '</td></tr>';
+            html += '<tr><td><strong>' + t('script_exists') + ':</strong></td><td>' + (data.scriptExists ? t('yes') : t('no')) + '</td></tr>';
+            html += '<tr><td><strong>' + t('m3u_exists') + ':</strong></td><td>' + (data.m3uExists ? t('yes') : t('no')) + '</td></tr>';
             
             // Aggiungi informazioni sull'aggiornamento pianificato
             if (data.scheduledUpdates) {
-                html += '<tr><td><strong>Aggiornamento Automatico:</strong></td><td>Attivo ogni ' + data.updateInterval + '</td></tr>';
+                html += '<tr><td><strong>' + t('auto_update') + ':</strong></td><td>' + t('auto_update_active') + ' ' + data.updateInterval + '</td></tr>';
             }
             
             if (data.scriptUrl) {
-                html += '<tr><td><strong>URL Script:</strong></td><td>' + data.scriptUrl + '</td></tr>';
+                html += '<tr><td><strong>' + t('script_url') + ':</strong></td><td>' + data.scriptUrl + '</td></tr>';
             }
             if (data.lastError) {
-                html += '<tr><td><strong>Ultimo Errore:</strong></td><td style="color: #ff6666;">' + data.lastError + '</td></tr>';
+                html += '<tr><td><strong>' + t('last_error') + ':</strong></td><td style="color: #ff6666;">' + data.lastError + '</td></tr>';
             }
             html += '</table>';
             
@@ -408,7 +542,7 @@ const getViewScripts = (protocol, host) => {
         async function downloadPythonScript() {
             const url = document.getElementById('pythonScriptUrl').value;
             if (!url) {
-                alert('Inserisci un URL valido per lo script Python');
+                alert(t('error_invalid_url'));
                 return;
             }
             
@@ -416,7 +550,7 @@ const getViewScripts = (protocol, host) => {
             document.getElementById('hidden_python_script_url').value = url;
             
             try {
-                showLoader('Download script Python in corso...');
+                showLoader(t('loader_download_script'));
                 
                 const response = await fetch('/api/python-script', {
                     method: 'POST',
@@ -434,21 +568,21 @@ const getViewScripts = (protocol, host) => {
                 hideLoader();
                 
                 if (data.success) {
-                    alert('Script scaricato con successo!');
+                    alert(t('success_script_downloaded'));
                 } else {
-                    alert('Errore: ' + data.message);
+                    alert(t('error_generic') + data.message);
                 }
                 
                 checkPythonStatus();
             } catch (error) {
                 hideLoader();
-                alert('Errore nella richiesta: ' + error.message);
+                alert(t('error_request') + error.message);
             }
         }
 
         async function executePythonScript() {
             try {
-                showLoader('Esecuzione script Python in corso...');
+                showLoader(t('loader_execute_script'));
                 
                 const response = await fetch('/api/python-script', {
                     method: 'POST',
@@ -465,16 +599,16 @@ const getViewScripts = (protocol, host) => {
                 hideLoader();
                 
                 if (data.success) {
-                    alert('Script eseguito con successo!');
+                    alert(t('success_script_executed'));
                     showM3uUrl(data.m3uUrl);
                 } else {
-                    alert('Errore: ' + data.message);
+                    alert(t('error_generic') + data.message);
                 }
                 
                 checkPythonStatus();
             } catch (error) {
                 hideLoader();
-                alert('Errore nella richiesta: ' + error.message);
+                alert(t('error_request') + error.message);
             }
         }
 
@@ -498,7 +632,7 @@ const getViewScripts = (protocol, host) => {
                     showM3uUrl(data.m3uUrl);
                 }
             } catch (error) {
-                alert('Errore nella richiesta: ' + error.message);
+                alert(t('error_request') + error.message);
             }
         }
 
@@ -528,13 +662,13 @@ const getViewScripts = (protocol, host) => {
                 document.getElementById('hidden_python_update_interval').value = updateInterval;
             }
             
-            alert('URL della playlist generata impostato nel campo M3U URL!');
+            alert(t('success_playlist_set'));
         }
         
         async function scheduleUpdates() {
             const interval = document.getElementById('updateInterval').value;
             if (!interval) {
-                alert('Inserisci un intervallo valido (es. 12:00)');
+                alert(t('error_invalid_interval'));
                 return;
             }
             
@@ -558,12 +692,12 @@ const getViewScripts = (protocol, host) => {
                 if (data.success) {
                     alert(data.message);
                 } else {
-                    alert('Errore: ' + data.message);
+                    alert(t('error_generic') + data.message);
                 }
                 
                 checkPythonStatus();
             } catch (error) {
-                alert('Errore nella richiesta: ' + error.message);
+                alert(t('error_request') + error.message);
             }
         }
 
@@ -584,7 +718,7 @@ const getViewScripts = (protocol, host) => {
                 alert(data.message);
                 checkPythonStatus();
             } catch (error) {
-                alert('Errore nella richiesta: ' + error.message);
+                alert(t('error_request') + error.message);
             }
         }
 
@@ -596,28 +730,27 @@ const getViewScripts = (protocol, host) => {
             statusEl.style.display = 'block';
             
             let html = '<table style="width: 100%; text-align: left;">';
-            html += '<tr><td><strong>In Esecuzione:</strong></td><td>' + (data.isRunning ? 'Sì' : 'No') + '</td></tr>';
-            html += '<tr><td><strong>Ultima Esecuzione:</strong></td><td>' + data.lastExecution + '</td></tr>';
-            html += '<tr><td><strong>Script Esistente:</strong></td><td>' + (data.scriptExists ? 'Sì' : 'No') + '</td></tr>';
+            html += '<tr><td><strong>' + t('running') + ':</strong></td><td>' + (data.isRunning ? t('yes') : t('no')) + '</td></tr>';
+            html += '<tr><td><strong>' + t('last_run') + ':</strong></td><td>' + data.lastExecution + '</td></tr>';
+            html += '<tr><td><strong>' + t('script_exists') + ':</strong></td><td>' + (data.scriptExists ? t('yes') : t('no')) + '</td></tr>';
             
             if (data.resolverVersion) {
-                html += '<tr><td><strong>Versione:</strong></td><td>' + data.resolverVersion + '</td></tr>';
+                html += '<tr><td><strong>' + t('version') + ':</strong></td><td>' + data.resolverVersion + '</td></tr>';
             }
             
             if (data.cacheItems !== undefined) {
-                html += '<tr><td><strong>Item in Cache:</strong></td><td>' + data.cacheItems + '</td></tr>';
+                html += '<tr><td><strong>' + t('cache_items') + ':</strong></td><td>' + data.cacheItems + '</td></tr>';
             }
             
-            // Aggiungi informazioni sull'aggiornamento pianificato
             if (data.scheduledUpdates) {
-                html += '<tr><td><strong>Aggiornamento Automatico:</strong></td><td>Attivo ogni ' + data.updateInterval + '</td></tr>';
+                html += '<tr><td><strong>' + t('auto_update') + ':</strong></td><td>' + t('auto_update_active') + ' ' + data.updateInterval + '</td></tr>';
             }
             
             if (data.scriptUrl) {
-                html += '<tr><td><strong>URL Script:</strong></td><td>' + data.scriptUrl + '</td></tr>';
+                html += '<tr><td><strong>' + t('script_url') + ':</strong></td><td>' + data.scriptUrl + '</td></tr>';
             }
             if (data.lastError) {
-                html += '<tr><td><strong>Ultimo Errore:</strong></td><td style="color: #ff6666;">' + data.lastError + '</td></tr>';
+                html += '<tr><td><strong>' + t('last_error') + ':</strong></td><td style="color: #ff6666;">' + data.lastError + '</td></tr>';
             }
             html += '</table>';
             
@@ -625,45 +758,38 @@ const getViewScripts = (protocol, host) => {
         }
 
         function initializeResolverFields() {
-            // Cerca il valore dell'intervallo nella query dell'URL
+            syncFormToResolverFields();
             const urlParams = new URLSearchParams(window.location.search);
             const resolverUpdateInterval = urlParams.get('resolver_update_interval');
-            
-            // In alternativa, cerca il campo nascosto nel form
             const hiddenField = document.querySelector('input[name="resolver_update_interval"]');
-            
-            // Imposta il valore nel campo visibile
             if (resolverUpdateInterval || (hiddenField && hiddenField.value)) {
                 document.getElementById('resolverUpdateInterval').value = resolverUpdateInterval || hiddenField.value;
             }
-            
-            // Esegui il controllo dello stato
+            const urlEl = document.getElementById('resolverScriptUrl');
+            const enEl = document.getElementById('resolverEnabled');
+            if (urlEl) urlEl.addEventListener('change', syncResolverFieldsToForm);
+            if (urlEl) urlEl.addEventListener('input', syncResolverFieldsToForm);
+            if (enEl) enEl.addEventListener('change', syncResolverFieldsToForm);
             checkResolverStatus();
         }
         
-        // Assicurati che questa funzione venga chiamata al caricamento della pagina
         window.addEventListener('DOMContentLoaded', function() {
+            window.applyLanguage(window.currentLang);
             initializePythonFields();
             initializeResolverFields();
         });
-        
-        // Aggiungi questa chiamata all'evento DOMContentLoaded
-        window.addEventListener('DOMContentLoaded', function() {
-            initializePythonFields();
-            initializeResolverFields(); // Aggiungi questa riga
-        });
 
         async function downloadResolverScript() {
-            // Leggi l'URL dal campo nella configurazione avanzata
-            const url = document.querySelector('input[name="resolver_script"]').value;
+            syncResolverFieldsToForm();
+            const url = document.getElementById('resolverScriptUrl').value;
             
             if (!url) {
-                alert('Inserisci un URL valido nella sezione "Impostazioni Avanzate" → "URL Script Resolver Python"');
+                alert(t('error_resolver_url'));
                 return;
             }
             
             try {
-                showLoader('Download script resolver in corso...');
+                showLoader(t('loader_download_resolver'));
                 
                 const response = await fetch('/api/resolver', {
                     method: 'POST',
@@ -681,23 +807,25 @@ const getViewScripts = (protocol, host) => {
                 hideLoader();
                 
                 if (data.success) {
-                    alert('Script resolver scaricato con successo!');
+                    alert(t('success_resolver_downloaded'));
                     // Non serve impostare nuovamente l'URL poiché lo leggiamo direttamente dal campo configurazione
-                    document.querySelector('input[name="resolver_enabled"]').checked = true;
+                    document.getElementById('resolverEnabled').checked = true;
+                    const he = document.getElementById('hidden_resolver_enabled');
+                    if (he) he.value = 'true';
                 } else {
-                    alert('Errore: ' + data.message);
+                    alert(t('error_generic') + data.message);
                 }
                 
                 checkResolverStatus();
             } catch (error) {
                 hideLoader();
-                alert('Errore nella richiesta: ' + error.message);
+                alert(t('error_request') + error.message);
             }
         }
 
         async function createResolverTemplate() {
             try {
-                showLoader('Creazione template in corso...');
+                showLoader(t('loader_creating_template'));
                 
                 const response = await fetch('/api/resolver', {
                     method: 'POST',
@@ -714,18 +842,18 @@ const getViewScripts = (protocol, host) => {
                 hideLoader();
                 
                 if (data.success) {
-                    alert('Template dello script resolver creato con successo! Il download inizierà automaticamente.');
+                    alert(t('success_template_created'));
                     
                     // Avvia il download automatico
                     window.location.href = '/api/resolver/download-template';
                     
                     checkResolverStatus();
                 } else {
-                    alert('Errore: ' + data.message);
+                    alert(t('error_generic') + data.message);
                 }
             } catch (error) {
                 hideLoader();
-                alert('Errore nella richiesta: ' + error.message);
+                alert(t('error_request') + error.message);
             }
         }
 
@@ -744,14 +872,14 @@ const getViewScripts = (protocol, host) => {
                 
                 const data = await response.json();
                 if (data.success) {
-                    alert('✅ Script resolver verificato con successo!');
+                    alert('✅ ' + t('success_resolver_verified'));
                 } else {
-                    alert('❌ Errore nella verifica dello script: ' + data.message);
+                    alert('❌ ' + t('error_generic') + data.message);
                 }
                 
                 checkResolverStatus();
             } catch (error) {
-                alert('Errore nella richiesta: ' + error.message);
+                alert(t('error_request') + error.message);
             }
         }
 
@@ -771,7 +899,7 @@ const getViewScripts = (protocol, host) => {
                 const data = await response.json();
                 showResolverStatus(data);
             } catch (error) {
-                alert('Errore nella richiesta: ' + error.message);
+                alert(t('error_request') + error.message);
             }
         }
 
@@ -790,26 +918,26 @@ const getViewScripts = (protocol, host) => {
                 
                 const data = await response.json();
                 if (data.success) {
-                    alert('Cache del resolver svuotata con successo!');
+                    alert(t('success_cache_cleared'));
                 } else {
-                    alert('Errore: ' + data.message);
+                    alert(t('error_generic') + data.message);
                 }
                 
                 checkResolverStatus();
             } catch (error) {
-                alert('Errore nella richiesta: ' + error.message);
+                alert(t('error_request') + error.message);
             }
         }
 
         async function scheduleResolverUpdates() {
             const interval = document.getElementById('resolverUpdateInterval').value;
             if (!interval) {
-                alert('Inserisci un intervallo valido (es. 12:00)');
+                alert(t('error_invalid_interval'));
                 return;
             }
             
             try {
-                showLoader('Configurazione aggiornamento automatico in corso...');
+                showLoader(t('loader_scheduling'));
                 
                 // Crea un campo nascosto nel form se non esiste già
                 let hiddenField = document.querySelector('input[name="resolver_update_interval"]');
@@ -841,13 +969,13 @@ const getViewScripts = (protocol, host) => {
                 if (data.success) {
                     alert(data.message);
                 } else {
-                    alert('Errore: ' + data.message);
+                    alert(t('error_generic') + data.message);
                 }
                 
                 checkResolverStatus();
             } catch (error) {
                 hideLoader();
-                alert('Errore nella richiesta: ' + error.message);
+                alert(t('error_request') + error.message);
             }
         }
         
@@ -872,8 +1000,8 @@ const getViewScripts = (protocol, host) => {
         }
 
         //funzioni per visualizzare la rotella di caricamento
-        function showLoader(message = "Operazione in corso...") {
-            document.getElementById('loaderMessage').textContent = message;
+        function showLoader(message) {
+            document.getElementById('loaderMessage').textContent = message || t('loader_default');
             document.getElementById('loaderOverlay').style.display = 'flex';
         }
         
@@ -883,7 +1011,7 @@ const getViewScripts = (protocol, host) => {
 
         async function stopResolverUpdates() {
             try {
-                showLoader('Arresto aggiornamenti automatici in corso...');
+                showLoader(t('loader_stopping'));
                 
                 const response = await fetch('/api/resolver', {
                     method: 'POST',
@@ -911,13 +1039,13 @@ const getViewScripts = (protocol, host) => {
                         hiddenField.value = '';
                     }
                 } else {
-                    alert('Errore: ' + data.message);
+                    alert(t('error_generic') + data.message);
                 }
                 
                 checkResolverStatus();
             } catch (error) {
                 hideLoader();
-                alert('Errore nella richiesta: ' + error.message);
+                alert(t('error_request') + error.message);
             }
         }
         

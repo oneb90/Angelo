@@ -30,6 +30,10 @@ A coffee ☕ or a beer 🍺 is a much appreciated gesture of recognition and hel
 - **⏰ Session expiry (24h)**: If a session receives no requests for **24 hours**, it expires automatically: all cache for that session (M3U cache, EPG, resolver, generator) is removed. On the next request with the same config, the session is recreated and data is repopulated from the URLs.
 
 ### 🔧 Improvements
+- **⚙️ Settings section**: The catalog has a **⚙️** genre filter that groups utility channels: **Refresh M3U playlist**, **Refresh EPG**, and **Regenerate Python playlist**. Descriptions and messages are in English.
+- **🔄 Pseudo-channels**: Opening a channel from the ⚙️ section runs the action (reload playlist, EPG update, or Python regeneration) and shows an outcome message; no real video stream.
+- **♻️ Cache on restart**: If the cache is empty (e.g. after a Docker restart), the playlist and EPG are rebuilt automatically on the first request when M3U/EPG URLs are configured.
+- **📺 EPG and channel IDs**: Improved EPG matching for channels with suffixes (e.g. `canale5.it` / `canale5`).
 - **🔒 Home protection UI**: When protection is active you see the checkbox and a "Modifica password" (Change password) button; password and confirm fields only appear when you click it.
 - **🔗 Return after login**: After entering the password on the gate you are redirected back to the page you came from (e.g. configuration page with encoded URL).
 
@@ -199,8 +203,8 @@ Click on a channel to see:
 - To avoid duplicates, remove the addon on Stremio
 - Return to the configuration page and click **Install on Stremio**
 
-### 🔧 Playlist Regeneration
-- If you have configured a Python script, use the special **Regenerate Python Playlist** channel to recreate the playlist
+### 🔧 Playlist regeneration and quick updates
+- In the **⚙️** section (genre filter in the catalog) you will find: **Refresh M3U playlist** (reload from source), **Refresh EPG** (update program guide), **Regenerate Python playlist** (run script and reload). Open the channel and follow the on-screen message.
 
 ## 📋 Summary of Main Features
 

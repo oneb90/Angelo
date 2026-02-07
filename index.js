@@ -24,6 +24,7 @@ const removeResolverSession = PythonResolverModule.removeResolverSession;
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const logger = require('./logger');
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -38,6 +39,14 @@ function getSessionKeyFromConfig(userConfig) {
     keys.forEach(k => { if (userConfig[k] !== undefined && userConfig[k] !== '') o[k] = String(userConfig[k]); });
     const str = JSON.stringify(o);
     return crypto.createHash('sha256').update(str).digest('hex').slice(0, 16);
+}
+
+const SETTINGS_GENRE = '⚙️';
+
+function getGenreOptions(cacheManager) {
+    const raw = (cacheManager.getCachedData().genres || []);
+    const normalized = raw.map(g => (g === '~SETTINGS~' || g === 'Settings' ? SETTINGS_GENRE : g));
+    return [...new Set([...normalized, SETTINGS_GENRE])];
 }
 
 // Registry cache per sessione (chiave derivata dalla config)
@@ -80,7 +89,7 @@ function expireSession(sessionKey) {
     removeResolverSession(sessionKey);
     removeRunnerSession(sessionKey);
     sessionLastActivity.delete(sessionKey);
-    console.log('⏰ Sessione scaduta e rimossa:', sessionKey);
+    logger.log(sessionKey, 'Session expired and removed');
 }
 
 /** Controlla sessioni inattive da più di 24h e le rimuove. */
@@ -100,7 +109,7 @@ function cleanupExpiredSessions() {
         try {
             expireSession(key);
         } catch (e) {
-            console.error('Errore scadenza sessione', key, e.message);
+            logger.error(key, 'Session expiry error:', e.message);
         }
     });
 }
@@ -169,28 +178,28 @@ app.get('/:config/configure', async (req, res) => {
         const configString = Buffer.from(req.params.config, 'base64').toString();
         const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
 
-        // Inizializza il generatore Python se configurato
+        // Initialize Python generator from config if configured
         if (decodedConfig.python_script_url) {
             const sessionKey = getSessionKeyFromConfig(decodedConfig);
             const cacheManagerForConfig = await getCacheManager(decodedConfig.session_id, decodedConfig);
             const pythonRunnerForSession = getPythonRunner(sessionKey);
-            console.log('Inizializzazione Script Python Generatore dalla configurazione');
             try {
                 await pythonRunnerForSession.downloadScript(decodedConfig.python_script_url);
                 if (decodedConfig.python_update_interval) {
-                    console.log('Impostazione dell\'aggiornamento automatico del generatore Python');
                     pythonRunnerForSession.scheduleUpdate(decodedConfig.python_update_interval, cacheManagerForConfig);
                 }
+                logger.log(sessionKey, 'Python generator initialized from config');
             } catch (pythonError) {
-                console.error('Errore nell\'inizializzazione dello script Python:', pythonError);
+                logger.error(sessionKey, 'Python generator init error:', pythonError.message);
             }
         }
 
         const queryWithAuth = { ...decodedConfig, homeAuthEnabled: state.enabled ? 'true' : 'false' };
         const sessionKey = getSessionKeyFromConfig(decodedConfig);
-        res.send(renderConfigPage(protocol, host, queryWithAuth, config.manifest, sessionKey));
+        const showSessionChangeWarning = req.query.generated === '1' || req.query.generated === 'true';
+        res.send(renderConfigPage(protocol, host, queryWithAuth, config.manifest, sessionKey, showSessionChangeWarning));
     } catch (error) {
-        console.error('Errore nella configurazione:', error);
+        logger.error('_', 'Configure route error:', error.message);
         res.redirect('/');
     }
 });
@@ -210,11 +219,15 @@ app.get('/manifest.json', async (req, res) => {
         if (req.query.resolver_update_interval) {
             configUrl += `&resolver_update_interval=${encodeURIComponent(req.query.resolver_update_interval)}`;
         }
-        if (req.query.m3u && cacheManager.cache.m3uUrl !== req.query.m3u) {
+        cacheManager.ensureCacheLoaded();
+        const cacheEmpty = !cacheManager.cache?.stremioData?.channels?.length;
+        if (req.query.m3u && (cacheManager.cache.m3uUrl !== req.query.m3u || cacheEmpty)) {
             await cacheManager.rebuildCache(req.query.m3u, req.query);
+        } else if (cacheEmpty && !req.query.m3u) {
+            logger.warn(cacheManager?.sessionKey ?? '_', 'Manifest: cache empty and no M3U URL in config — playlists will not load. Configure M3U and reinstall the addon.');
         }
 
-        const { genres } = cacheManager.getCachedData();
+        const genres = getGenreOptions(cacheManager);
         const manifestConfig = {
             ...config.manifest,
             catalogs: [{
@@ -246,7 +259,7 @@ app.get('/manifest.json', async (req, res) => {
         res.setHeader('Content-Type', 'application/json');
         res.send(builder.getInterface().manifest);
     } catch (error) {
-        console.error('Error creating manifest:', error);
+        logger.error(cacheManager?.sessionKey ?? '_', 'Error creating manifest:', error.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -261,8 +274,12 @@ app.get('/:config/manifest.json', async (req, res) => {
         const protocol = req.headers['x-forwarded-proto'] || req.protocol;
         const host = req.headers['x-forwarded-host'] || req.get('host');
 
-        if (decodedConfig.m3u && cacheManager.cache.m3uUrl !== decodedConfig.m3u) {
+        cacheManager.ensureCacheLoaded();
+        const cacheEmpty = !cacheManager.cache?.stremioData?.channels?.length;
+        if (decodedConfig.m3u && (cacheManager.cache.m3uUrl !== decodedConfig.m3u || cacheEmpty)) {
             await cacheManager.rebuildCache(decodedConfig.m3u, decodedConfig);
+        } else if (cacheEmpty && !decodedConfig.m3u) {
+            logger.warn(getSessionKeyFromConfig(decodedConfig), 'Manifest: cache empty and no M3U URL in config — playlists will not load. Configure M3U and reinstall the addon.');
         }
         const sessionKey = cacheManager.sessionKey;
         const epgManager = await getEPGManager(sessionKey);
@@ -270,31 +287,29 @@ app.get('/:config/manifest.json', async (req, res) => {
         const pythonRunner = getPythonRunner(sessionKey);
 
         if (decodedConfig.resolver_script) {
-            console.log('Inizializzazione Script Resolver dalla configurazione');
             try {
                 await pythonResolver.downloadScript(decodedConfig.resolver_script);
                 if (decodedConfig.resolver_update_interval) {
-                    console.log('Impostazione dell\'aggiornamento automatico del resolver');
                     pythonResolver.scheduleUpdate(decodedConfig.resolver_update_interval);
                 }
+                logger.log(sessionKey, 'Resolver initialized from config');
             } catch (resolverError) {
-                console.error('Errore nell\'inizializzazione dello script Resolver:', resolverError);
+                logger.error(sessionKey, 'Resolver init error:', resolverError.message);
             }
         }
         if (decodedConfig.python_script_url) {
-            console.log('Inizializzazione Script Python Generatore dalla configurazione');
             try {
                 await pythonRunner.downloadScript(decodedConfig.python_script_url);
                 if (decodedConfig.python_update_interval) {
-                    console.log('Impostazione dell\'aggiornamento automatico del generatore Python');
                     pythonRunner.scheduleUpdate(decodedConfig.python_update_interval, cacheManager);
                 }
+                logger.log(sessionKey, 'Python generator initialized from config');
             } catch (pythonError) {
-                console.error('Errore nell\'inizializzazione dello script Python:', pythonError);
+                logger.error(sessionKey, 'Python generator init error:', pythonError.message);
             }
         }
 
-        const { genres } = cacheManager.getCachedData();
+        const genres = getGenreOptions(cacheManager);
         const manifestConfig = {
             ...config.manifest,
             catalogs: [{
@@ -338,7 +353,7 @@ app.get('/:config/manifest.json', async (req, res) => {
         res.setHeader('Content-Type', 'application/json');
         res.send(builder.getInterface().manifest);
     } catch (error) {
-        console.error('Error creating manifest:', error);
+        logger.error(cacheManager?.sessionKey ?? '_', 'Error creating manifest:', error.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -370,7 +385,7 @@ app.get('/:config/catalog/:type/:id/:extra?.json', async (req, res) => {
         res.setHeader('Content-Type', 'application/json');
         res.send(result);
     } catch (error) {
-        console.error('Error handling catalog request:', error);
+        logger.error(cacheManager?.sessionKey ?? '_', 'Error handling catalog request:', error.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -398,7 +413,7 @@ app.get('/:config/stream/:type/:id.json', async (req, res) => {
         res.setHeader('Content-Type', 'application/json');
         res.send(result);
     } catch (error) {
-        console.error('Error handling stream request:', error);
+        logger.error(cacheManager?.sessionKey ?? '_', 'Error handling stream request:', error.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -426,7 +441,7 @@ app.get('/:config/meta/:type/:id.json', async (req, res) => {
         res.setHeader('Content-Type', 'application/json');
         res.send(result);
     } catch (error) {
-        console.error('Error handling meta request:', error);
+        logger.error(cacheManager?.sessionKey ?? '_', 'Error handling meta request:', error.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -463,7 +478,7 @@ app.get('/:resource/:type/:id/:extra?.json', async (req, res, next) => {
         res.setHeader('Content-Type', 'application/json');
         res.send(result);
     } catch (error) {
-        console.error('Error handling request:', error);
+        logger.error(cacheManager?.sessionKey ?? '_', 'Error handling request:', error.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -479,48 +494,39 @@ app.get('/api/resolver/download-template', (req, res) => {
             res.setHeader('Content-Disposition', 'attachment; filename="resolver_script.py"');
             res.sendFile(PythonResolver.scriptPath);
         } else {
-            res.status(404).json({ success: false, message: 'Template non trovato. Crealo prima con la funzione "Crea Template".' });
+            res.status(404).json({ success: false, message: 'Template not found. Create it first with "Create Template".' });
         }
     } catch (error) {
-        console.error('Errore nel download del template:', error);
+        logger.error('_', 'Template download error:', error.message);
         res.status(500).json({ success: false, message: error.message });
     }
 });
 
 function cleanupTempFolder() {
-    console.log('\n=== Pulizia cartella temp all\'avvio ===');
     const tempDir = path.join(__dirname, 'temp');
-
-    // Controlla se la cartella temp esiste
     if (!fs.existsSync(tempDir)) {
-        console.log('Cartella temp non trovata, la creo...');
         fs.mkdirSync(tempDir, { recursive: true });
         return;
     }
-
     try {
-        // Leggi tutti i file nella cartella temp
         const files = fs.readdirSync(tempDir);
         let deletedCount = 0;
-
-        // Elimina ogni file
         for (const file of files) {
             try {
                 const filePath = path.join(tempDir, file);
-                // Controlla se è un file e non una cartella
                 if (fs.statSync(filePath).isFile()) {
                     fs.unlinkSync(filePath);
                     deletedCount++;
                 }
             } catch (fileError) {
-                console.error(`❌ Errore nell'eliminazione del file ${file}:`, fileError.message);
+                logger.error('_', 'Temp file delete error:', file, fileError.message);
             }
         }
-
-        console.log(`✓ Eliminati ${deletedCount} file temporanei`);
-        console.log('=== Pulizia cartella temp completata ===\n');
+        if (deletedCount > 0) {
+            logger.log('_', 'Temp folder cleanup: removed', deletedCount, 'file(s)');
+        }
     } catch (error) {
-        console.error('❌ Errore nella pulizia della cartella temp:', error.message);
+        logger.error('_', 'Temp folder cleanup error:', error.message);
     }
 }
 
@@ -560,7 +566,7 @@ function safeParseExtra(extraParam) {
             return {};
         }
     } catch (error) {
-        console.error('Error parsing extra:', error);
+        logger.error('_', 'Error parsing extra:', error.message);
         return {};
     }
 }
@@ -575,7 +581,7 @@ app.get('/generated-m3u', (req, res) => {
         res.setHeader('Content-Type', 'text/plain');
         res.send(m3uContent);
     } else {
-        res.status(404).send('File M3U non trovato. Eseguire prima lo script Python.');
+        res.status(404).send('M3U file not found. Run the Python script first.');
     }
 });
 
@@ -589,7 +595,7 @@ app.post('/api/resolver', async (req, res) => {
         if (action === 'download' && url) {
             const success = await resolver.downloadScript(url);
             if (success) {
-                res.json({ success: true, message: 'Script resolver scaricato con successo' });
+                res.json({ success: true, message: 'Resolver script downloaded successfully' });
             } else {
                 res.status(500).json({ success: false, message: resolver.getStatus().lastError });
             }
@@ -598,7 +604,7 @@ app.post('/api/resolver', async (req, res) => {
             if (success) {
                 res.json({
                     success: true,
-                    message: 'Template script resolver creato con successo',
+                    message: 'Resolver script template created successfully',
                     scriptPath: resolver.scriptPath
                 });
             } else {
@@ -608,19 +614,19 @@ app.post('/api/resolver', async (req, res) => {
             const isHealthy = await resolver.checkScriptHealth();
             res.json({
                 success: isHealthy,
-                message: isHealthy ? 'Script resolver valido' : resolver.getStatus().lastError
+                message: isHealthy ? 'Resolver script valid' : resolver.getStatus().lastError
             });
         } else if (action === 'status') {
             res.json(resolver.getStatus());
         } else if (action === 'clear-cache') {
             resolver.clearCache();
-            res.json({ success: true, message: 'Cache resolver svuotata' });
+            res.json({ success: true, message: 'Resolver cache cleared' });
         } else if (action === 'schedule' && interval) {
             const success = resolver.scheduleUpdate(interval);
             if (success) {
                 res.json({
                     success: true,
-                    message: `Aggiornamento automatico impostato ogni ${interval}`
+                    message: `Auto-update set every ${interval}`
                 });
             } else {
                 res.status(500).json({ success: false, message: resolver.getStatus().lastError });
@@ -629,13 +635,13 @@ app.post('/api/resolver', async (req, res) => {
             const stopped = resolver.stopScheduledUpdates();
             res.json({
                 success: true,
-                message: stopped ? 'Aggiornamento automatico fermato' : 'Nessun aggiornamento pianificato da fermare'
+                message: stopped ? 'Auto-update stopped' : 'No scheduled update to stop'
             });
         } else {
             res.status(400).json({ success: false, message: 'Azione non valida' });
         }
     } catch (error) {
-        console.error('Errore API Resolver:', error);
+        logger.error(sessionKey, 'Resolver API error:', error.message);
         res.status(500).json({ success: false, message: error.message });
     }
 });
@@ -644,15 +650,14 @@ app.post('/api/rebuild-cache', async (req, res) => {
     try {
         const m3uUrl = req.body.m3u;
         if (!m3uUrl) {
-            return res.status(400).json({ success: false, message: 'URL M3U richiesto' });
+            return res.status(400).json({ success: false, message: 'M3U URL required' });
         }
 
         const cacheManager = await getCacheManager(req.body.session_id, req.body);
-        console.log('🔄 Richiesta di ricostruzione cache ricevuta');
+        logger.log(cacheManager.sessionKey, 'Rebuild cache requested');
         await cacheManager.rebuildCache(req.body.m3u, req.body);
 
         if (req.body.epg_enabled === 'true') {
-            console.log('📡 Ricostruzione EPG in corso...');
             const epgManager = await getEPGManager(cacheManager.sessionKey);
             const epgToUse = req.body.epg ||
                 (cacheManager.getCachedData().epgUrls && cacheManager.getCachedData().epgUrls.length > 0
@@ -663,10 +668,10 @@ app.post('/api/rebuild-cache', async (req, res) => {
             }
         }
 
-        res.json({ success: true, message: 'Cache e EPG ricostruiti con successo' });
+        res.json({ success: true, message: 'Cache and EPG rebuilt successfully' });
 
     } catch (error) {
-        console.error('Errore nella ricostruzione della cache:', error);
+        logger.error(cacheManager?.sessionKey ?? '_', 'Rebuild cache error:', error.message);
         res.status(500).json({ success: false, message: error.message });
     }
 });
@@ -683,7 +688,7 @@ app.post('/api/python-script', async (req, res) => {
         if (action === 'download' && url) {
             const success = await runner.downloadScript(url);
             if (success) {
-                res.json({ success: true, message: 'Script scaricato con successo' });
+                res.json({ success: true, message: 'Script downloaded successfully' });
             } else {
                 res.status(500).json({ success: false, message: runner.getStatus().lastError });
             }
@@ -693,7 +698,7 @@ app.post('/api/python-script', async (req, res) => {
                 const m3uUrl = `${req.protocol}://${req.get('host')}/generated-m3u` + (sessionKey !== '_default' ? `?session_key=${encodeURIComponent(sessionKey)}` : '');
                 res.json({
                     success: true,
-                    message: 'Script eseguito con successo',
+                    message: 'Script executed successfully',
                     m3uUrl
                 });
             } else {
@@ -710,7 +715,7 @@ app.post('/api/python-script', async (req, res) => {
             if (success) {
                 res.json({
                     success: true,
-                    message: `Aggiornamento automatico impostato ogni ${interval}`
+                    message: `Auto-update set every ${interval}`
                 });
             } else {
                 res.status(500).json({ success: false, message: runner.getStatus().lastError });
@@ -719,13 +724,13 @@ app.post('/api/python-script', async (req, res) => {
             const stopped = runner.stopScheduledUpdates();
             res.json({
                 success: true,
-                message: stopped ? 'Aggiornamento automatico fermato' : 'Nessun aggiornamento pianificato da fermare'
+                message: stopped ? 'Auto-update stopped' : 'No scheduled update to stop'
             });
         } else {
             res.status(400).json({ success: false, message: 'Azione non valida' });
         }
     } catch (error) {
-        console.error('Errore API Python:', error);
+        logger.error(sessionKey, 'Python script API error:', error.message);
         res.status(500).json({ success: false, message: error.message });
     }
 });
@@ -737,19 +742,15 @@ async function startAddon() {
 
     // Timer scadenza sessioni: ogni 15 minuti controlla e rimuove sessioni inattive da 24h
     setInterval(cleanupExpiredSessions, 15 * 60 * 1000);
-    console.log('✓ Timer scadenza sessioni attivo (24h inattività, controllo ogni 15 min)');
+    logger.log('_', 'Session expiry timer active (24h inactivity, check every 15 min)');
 
     try {
         const port = process.env.PORT || 10000;
         app.listen(port, () => {
-            console.log('=============================\n');
-            console.log('OMG ADDON Avviato con successo');
-            console.log('Visita la pagina web per generare la configurazione del manifest e installarla su stremio');
-            console.log('Link alla pagina di configurazione:', `http://localhost:${port}`);
-            console.log('=============================\n');
+            logger.log('_', 'OMG addon started. Config page: http://localhost:' + port);
         });
     } catch (error) {
-        console.error('Failed to start addon:', error);
+        logger.error('_', 'Failed to start addon:', error.message);
         process.exit(1);
     }
 }

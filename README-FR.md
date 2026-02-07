@@ -34,6 +34,10 @@ Un café ☕ ou une bière 🍺 sont un geste de reconnaissance très apprécié
 - **⏰ Expiration des sessions (24h)** : Si une session ne reçoit aucune requête pendant **24 heures**, elle expire automatiquement : tout le cache de cette session (cache M3U, EPG, résolveur, générateur) est supprimé. À la prochaine requête avec la même config, la session est recréée et les données sont rechargées depuis les URL.
 
 ### 🔧 Améliorations
+- **⚙️ Section Paramètres** : Le catalogue a un filtre genre **⚙️** qui regroupe les canaux utilitaires : **Refresh M3U playlist**, **Refresh EPG**, **Rigenera Playlist Python**. Descriptions et messages en anglais.
+- **🔄 Pseudo-canaux** : Ouvrir un canal de la section ⚙️ exécute l’action (rechargement playlist, mise à jour EPG ou régénération Python) et affiche un message de résultat ; pas de flux vidéo réel.
+- **♻️ Cache au redémarrage** : Si le cache est vide (ex. après redémarrage Docker), la playlist et l’EPG sont reconstruits à la première requête quand les URL M3U/EPG sont configurées.
+- **📺 EPG et ID canaux** : Meilleure correspondance EPG pour les canaux avec suffixe (ex. `canale5.it` / `canale5`).
 - **🔒 Interface protection home** : Quand la protection est active, la case et le bouton « Modifica password » (Modifier le mot de passe) sont visibles ; les champs mot de passe et confirmation n’apparaissent qu’en cliquant dessus.
 - **🔗 Retour après connexion** : Après avoir saisi le mot de passe sur la page d’accès, vous êtes renvoyé à la page d’origine (ex. page de configuration avec URL encodée).
 
@@ -203,8 +207,8 @@ Cliquez sur une chaîne pour voir :
 - Pour éviter un doublon, supprimez l'addon sur Stremio
 - Retournez à la page de configuration et cliquez sur **Installer sur Stremio**
 
-### 🔧 Régénération de la playlist
-- Si vous avez configuré un script Python, utilisez le canal spécial **Régénérer Playlist Python** pour recréer la playlist
+### 🔧 Régénération de la playlist et mises à jour rapides
+- Dans la section **⚙️** (filtre par genre du catalogue) : **Refresh M3U playlist** (recharger depuis la source), **Refresh EPG** (mettre à jour la guide), **Rigenera Playlist Python** (exécuter le script et recharger). Ouvrez le canal et suivez le message à l’écran.
 
 ## 📋 Résumé des fonctionnalités principales
 
