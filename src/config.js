@@ -18,7 +18,7 @@ const baseConfig = {
     },
     manifest: {
         id: 'org.mccoy88f.omgtv',
-        version: '1.0.0',
+        version: '7.0.0',
         name: 'OMG TV',
         description: 'Modalita provvisoria, installazione con errori, attivo mod. provvisoria',
         logo: 'https://github.com/mccoy88f/OMG-TV-Stremio-Addon/blob/main/tv.png?raw=true',
@@ -55,7 +55,7 @@ const baseConfig = {
 };
 
 function loadCustomConfig() {
-    const configOverridePath = path.join(__dirname, 'addon-config.json');
+    const configOverridePath = path.join(__dirname, '..', 'addon-config.json');
     
     try {
         const addonConfigExists = fs.existsSync(configOverridePath);
@@ -103,7 +103,7 @@ function loadCustomConfig() {
             return mergedConfig;
         }
     } catch (error) {
-        console.error('Errore nel caricare la configurazione personalizzata:', error);
+        console.error('Error loading custom configuration:', error);
     }
 
     return baseConfig;

@@ -1,58 +1,205 @@
 const express = require('express');
 const cors = require('cors');
+const cookieParser = require('cookie-parser');
 const { addonBuilder } = require('stremio-addon-sdk');
-const PlaylistTransformer = require('./playlist-transformer');
-const { catalogHandler, streamHandler } = require('./handlers');
-const metaHandler = require('./meta-handler');
-const EPGManager = require('./epg-manager');
-const config = require('./config');
-const CacheManagerFactory = require('./cache-manager');
-const { renderConfigPage } = require('./views');
-const PythonRunner = require('./python-runner');
-const ResolverStreamManager = require('./resolver-stream-manager')();
-const PythonResolver = require('./python-resolver');
+const PlaylistTransformer = require('./src/playlist-transformer');
+const { catalogHandler, streamHandler } = require('./src/handlers');
+const metaHandler = require('./src/meta-handler');
+const EPGManagerModule = require('./src/epg-manager');
+const getEPGManager = EPGManagerModule.getEPGManager;
+const removeEPGSession = EPGManagerModule.removeEPGSession;
+const config = require('./src/config');
+const CacheManagerFactory = require('./src/cache-manager');
+const { renderConfigPage, renderGatePage } = require('./views/views');
+const homeAuth = require('./src/home-auth');
+const PythonRunnerModule = require('./src/python-runner');
+const PythonRunner = PythonRunnerModule;
+const getPythonRunner = PythonRunnerModule.getPythonRunner;
+const removeRunnerSession = PythonRunnerModule.removeRunnerSession;
+const ResolverStreamManager = require('./src/resolver-stream-manager')();
+const PythonResolverModule = require('./src/python-resolver');
+const PythonResolver = PythonResolverModule;
+const getPythonResolver = PythonResolverModule.getPythonResolver;
+const removeResolverSession = PythonResolverModule.removeResolverSession;
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const logger = require('./src/logger');
 const app = express();
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
+
+// Chiave cache derivata dalla config (stessa config = stessa cache; nessun session_id scelto dall'utente)
+function getSessionKeyFromConfig(userConfig) {
+    if (!userConfig || typeof userConfig !== 'object') return '_default';
+    const keys = ['m3u', 'epg', 'proxy', 'id_suffix', 'remapper_path', 'update_interval', 'resolver_script', 'python_script_url'];
+    const o = {};
+    keys.forEach(k => { if (userConfig[k] !== undefined && userConfig[k] !== '') o[k] = String(userConfig[k]); });
+    const str = JSON.stringify(o);
+    return crypto.createHash('sha256').update(str).digest('hex').slice(0, 16);
+}
+
+const SETTINGS_GENRE = '⚙️';
+
+function getGenreOptions(cacheManager) {
+    const raw = (cacheManager.getCachedData().genres || []);
+    const normalized = raw.map(g => (g === '~SETTINGS~' || g === 'Settings' ? SETTINGS_GENRE : g));
+    return [...new Set([...normalized, SETTINGS_GENRE])];
+}
+
+// Registry cache per sessione (chiave derivata dalla config)
+const cacheRegistry = new Map();
+
+// Ultima attività per sessione (solo non-default). Scadenza 24h.
+const SESSION_TTL_MS = 24 * 60 * 60 * 1000;
+const sessionLastActivity = new Map();
+
+function touchSession(sessionKey) {
+    if (sessionKey && sessionKey !== '_default') {
+        sessionLastActivity.set(sessionKey, Date.now());
+    }
+}
+
+async function getCacheManager(sessionId, userConfig) {
+    const key = (sessionId && String(sessionId).trim()) ? String(sessionId).trim() : getSessionKeyFromConfig(userConfig);
+    if (!cacheRegistry.has(key)) {
+        cacheRegistry.set(key, await CacheManagerFactory(userConfig || {}, key === '_default' ? null : key));
+    }
+    const cm = cacheRegistry.get(key);
+    cm.sessionKey = key;
+    if (userConfig && Object.keys(userConfig).length) cm.updateConfig(userConfig);
+    touchSession(key);
+    return cm;
+}
+
+/**
+ * Elimina una sessione scaduta (cache, EPG, resolver, runner) e rimuove dai registry.
+ * Non usare per _default.
+ */
+function expireSession(sessionKey) {
+    if (sessionKey === '_default') return;
+    const cm = cacheRegistry.get(sessionKey);
+    if (cm) {
+        cm.destroy();
+        cacheRegistry.delete(sessionKey);
+    }
+    removeEPGSession(sessionKey);
+    removeResolverSession(sessionKey);
+    removeRunnerSession(sessionKey);
+    sessionLastActivity.delete(sessionKey);
+    logger.log(sessionKey, 'Session expired and removed');
+}
+
+/** Controlla sessioni inattive da più di 24h e le rimuove. */
+function cleanupExpiredSessions() {
+    const now = Date.now();
+    const toExpire = new Set();
+    for (const [key, last] of sessionLastActivity) {
+        if (now - last >= SESSION_TTL_MS) toExpire.add(key);
+    }
+    // Anche sessioni in cache ma senza lastActivity (es. create prima del touch)
+    for (const key of cacheRegistry.keys()) {
+        if (key === '_default') continue;
+        const last = sessionLastActivity.get(key);
+        if (last === undefined || now - last >= SESSION_TTL_MS) toExpire.add(key);
+    }
+    toExpire.forEach(key => {
+        try {
+            expireSession(key);
+        } catch (e) {
+            logger.error(key, 'Session expiry error:', e.message);
+        }
+    });
+}
+
+// API per ottenere l'ID sessione dalla config (per UI e export)
+app.post('/api/session-key', (req, res) => {
+    try {
+        const sessionKey = getSessionKeyFromConfig(req.body || {});
+        res.json({ sessionKey });
+    } catch (e) {
+        res.status(400).json({ error: e.message });
+    }
+});
+
+// API protezione home (prima del gate per permettere chiamate senza cookie)
+app.get('/api/home-auth/status', (req, res) => {
+    res.json(homeAuth.getState());
+});
+app.post('/api/home-auth/set', (req, res) => {
+    const { enabled, password, confirm } = req.body || {};
+    const result = homeAuth.setProtection(!!enabled, password);
+    res.json(result);
+});
+app.post('/api/home-auth/unlock', (req, res) => {
+    const password = (req.body && req.body.password) || '';
+    if (!homeAuth.verifyPassword(password)) {
+        const returnUrl = (req.body && req.body.returnUrl) || '';
+        const safeReturn = returnUrl && returnUrl.startsWith('/') && !returnUrl.startsWith('//') ? returnUrl : '';
+        return res.redirect(safeReturn ? `${safeReturn}${safeReturn.includes('?') ? '&' : '?'}error=1` : '/?error=1');
+    }
+    const value = homeAuth.getUnlockCookieValue();
+    if (value) {
+        res.cookie(homeAuth.COOKIE_NAME, value, {
+            maxAge: homeAuth.COOKIE_MAX_AGE_MS,
+            httpOnly: true,
+            path: '/',
+            sameSite: 'lax'
+        });
+    }
+    const returnUrl = (req.body && req.body.returnUrl) || '';
+    const safeReturn = returnUrl && returnUrl.startsWith('/') && !returnUrl.startsWith('//') ? returnUrl : '/';
+    res.redirect(safeReturn);
+});
 
 // Route principale - supporta sia il vecchio che il nuovo sistema
 app.get('/', async (req, res) => {
+    const state = homeAuth.getState();
+    if (state.enabled && !homeAuth.verifyUnlockCookie(req.cookies[homeAuth.COOKIE_NAME])) {
+        return res.send(renderGatePage(config.manifest, req.path));
+    }
     const protocol = req.headers['x-forwarded-proto'] || req.protocol;
     const host = req.headers['x-forwarded-host'] || req.get('host');
-    res.send(renderConfigPage(protocol, host, req.query, config.manifest));
+    const queryWithAuth = { ...req.query, homeAuthEnabled: state.enabled ? 'true' : 'false' };
+    res.send(renderConfigPage(protocol, host, queryWithAuth, config.manifest));
 });
 
 // Nuova route per la configurazione codificata
 app.get('/:config/configure', async (req, res) => {
+    const state = homeAuth.getState();
+    if (state.enabled && !homeAuth.verifyUnlockCookie(req.cookies[homeAuth.COOKIE_NAME])) {
+        return res.send(renderGatePage(config.manifest, req.path));
+    }
     try {
         const protocol = req.headers['x-forwarded-proto'] || req.protocol;
         const host = req.headers['x-forwarded-host'] || req.get('host');
         const configString = Buffer.from(req.params.config, 'base64').toString();
         const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
 
-        // Inizializza il generatore Python se configurato
+        // Initialize Python generator from config if configured
         if (decodedConfig.python_script_url) {
-            console.log('Inizializzazione Script Python Generatore dalla configurazione');
+            const sessionKey = getSessionKeyFromConfig(decodedConfig);
+            const cacheManagerForConfig = await getCacheManager(decodedConfig.session_id, decodedConfig);
+            const pythonRunnerForSession = getPythonRunner(sessionKey);
             try {
-                // Scarica lo script Python se non già scaricato
-                await PythonRunner.downloadScript(decodedConfig.python_script_url);
-
-                // Se è stato definito un intervallo di aggiornamento, impostalo
+                await pythonRunnerForSession.downloadScript(decodedConfig.python_script_url);
                 if (decodedConfig.python_update_interval) {
-                    console.log('Impostazione dell\'aggiornamento automatico del generatore Python');
-                    PythonRunner.scheduleUpdate(decodedConfig.python_update_interval);
+                    pythonRunnerForSession.scheduleUpdate(decodedConfig.python_update_interval, cacheManagerForConfig);
                 }
+                logger.log(sessionKey, 'Python generator initialized from config');
             } catch (pythonError) {
-                console.error('Errore nell\'inizializzazione dello script Python:', pythonError);
+                logger.error(sessionKey, 'Python generator init error:', pythonError.message);
             }
         }
 
-        res.send(renderConfigPage(protocol, host, decodedConfig, config.manifest));
+        const queryWithAuth = { ...decodedConfig, homeAuthEnabled: state.enabled ? 'true' : 'false' };
+        const sessionKey = getSessionKeyFromConfig(decodedConfig);
+        const showSessionChangeWarning = req.query.generated === '1' || req.query.generated === 'true';
+        res.send(renderConfigPage(protocol, host, queryWithAuth, config.manifest, sessionKey, showSessionChangeWarning));
     } catch (error) {
-        console.error('Errore nella configurazione:', error);
+        logger.error('_', 'Configure route error:', error.message);
         res.redirect('/');
     }
 });
@@ -60,35 +207,35 @@ app.get('/:config/configure', async (req, res) => {
 // Route per il manifest - supporta sia il vecchio che il nuovo sistema
 app.get('/manifest.json', async (req, res) => {
     try {
+        const cacheManager = await getCacheManager(req.query.session_id, req.query);
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
+
         const protocol = req.headers['x-forwarded-proto'] || req.protocol;
         const host = req.headers['x-forwarded-host'] || req.get('host');
         const configUrl = `${protocol}://${host}/?${new URLSearchParams(req.query)}`;
         if (req.query.resolver_update_interval) {
             configUrl += `&resolver_update_interval=${encodeURIComponent(req.query.resolver_update_interval)}`;
         }
-        if (req.query.m3u && global.CacheManager.cache.m3uUrl !== req.query.m3u) {
-            await global.CacheManager.rebuildCache(req.query.m3u);
+        cacheManager.ensureCacheLoaded();
+        const cacheEmpty = !cacheManager.cache?.stremioData?.channels?.length;
+        if (req.query.m3u && (cacheManager.cache.m3uUrl !== req.query.m3u || cacheEmpty)) {
+            await cacheManager.rebuildCache(req.query.m3u, req.query);
+        } else if (cacheEmpty && !req.query.m3u) {
+            logger.warn(cacheManager?.sessionKey ?? '_', 'Manifest: cache empty and no M3U URL in config — playlists will not load. Configure M3U and reinstall the addon.');
         }
 
-        const { genres } = global.CacheManager.getCachedData();
+        const genres = getGenreOptions(cacheManager);
         const manifestConfig = {
             ...config.manifest,
             catalogs: [{
                 ...config.manifest.catalogs[0],
                 extra: [
-                    {
-                        name: 'genre',
-                        isRequired: false,
-                        options: genres
-                    },
-                    {
-                        name: 'search',
-                        isRequired: false
-                    },
-                    {
-                        name: 'skip',
-                        isRequired: false
-                    }
+                    { name: 'genre', isRequired: false, options: genres },
+                    { name: 'search', isRequired: false },
+                    { name: 'skip', isRequired: false }
                 ]
             }],
             behaviorHints: {
@@ -100,24 +247,19 @@ app.get('/manifest.json', async (req, res) => {
         const builder = new addonBuilder(manifestConfig);
 
         if (req.query.epg_enabled === 'true') {
-            // Se non è stato fornito manualmente un EPG URL, usa quello della playlist
             const epgToUse = req.query.epg ||
-                (global.CacheManager.getCachedData().epgUrls &&
-                    global.CacheManager.getCachedData().epgUrls.length > 0
-                    ? global.CacheManager.getCachedData().epgUrls.join(',')
-                    : null);
-
-            if (epgToUse) {
-                await EPGManager.initializeEPG(epgToUse);
-            }
+                (cacheManager.getCachedData().epgUrls && cacheManager.getCachedData().epgUrls.length > 0
+                    ? cacheManager.getCachedData().epgUrls.join(',') : null);
+            if (epgToUse) await epgManager.initializeEPG(epgToUse);
         }
-        builder.defineCatalogHandler(async (args) => catalogHandler({ ...args, config: req.query }));
-        builder.defineStreamHandler(async (args) => streamHandler({ ...args, config: req.query }));
-        builder.defineMetaHandler(async (args) => metaHandler({ ...args, config: req.query }));
+
+        builder.defineCatalogHandler(async (args) => catalogHandler({ ...args, config: req.query, cacheManager, epgManager, pythonResolver, pythonRunner }));
+        builder.defineStreamHandler(async (args) => streamHandler({ ...args, config: req.query, cacheManager, epgManager, pythonResolver, pythonRunner }));
+        builder.defineMetaHandler(async (args) => metaHandler({ ...args, config: req.query, cacheManager, epgManager, pythonResolver, pythonRunner }));
         res.setHeader('Content-Type', 'application/json');
         res.send(builder.getInterface().manifest);
     } catch (error) {
-        console.error('Error creating manifest:', error);
+        logger.error(cacheManager?.sessionKey ?? '_', 'Error creating manifest:', error.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
@@ -125,47 +267,49 @@ app.get('/manifest.json', async (req, res) => {
 // Nuova route per il manifest con configurazione codificata
 app.get('/:config/manifest.json', async (req, res) => {
     try {
-        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
-        const host = req.headers['x-forwarded-host'] || req.get('host');
         const configString = Buffer.from(req.params.config, 'base64').toString();
         const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
+        const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
 
-        if (decodedConfig.m3u && global.CacheManager.cache.m3uUrl !== decodedConfig.m3u) {
-            await global.CacheManager.rebuildCache(decodedConfig.m3u);
+        const protocol = req.headers['x-forwarded-proto'] || req.protocol;
+        const host = req.headers['x-forwarded-host'] || req.get('host');
+
+        cacheManager.ensureCacheLoaded();
+        const cacheEmpty = !cacheManager.cache?.stremioData?.channels?.length;
+        if (decodedConfig.m3u && (cacheManager.cache.m3uUrl !== decodedConfig.m3u || cacheEmpty)) {
+            await cacheManager.rebuildCache(decodedConfig.m3u, decodedConfig);
+        } else if (cacheEmpty && !decodedConfig.m3u) {
+            logger.warn(getSessionKeyFromConfig(decodedConfig), 'Manifest: cache empty and no M3U URL in config — playlists will not load. Configure M3U and reinstall the addon.');
         }
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
+
         if (decodedConfig.resolver_script) {
-            console.log('Inizializzazione Script Resolver dalla configurazione');
             try {
-                // Scarica lo script Resolver
-                const resolverDownloaded = await PythonResolver.downloadScript(decodedConfig.resolver_script);
-
-                // Se è stato definito un intervallo di aggiornamento, impostalo
+                await pythonResolver.downloadScript(decodedConfig.resolver_script);
                 if (decodedConfig.resolver_update_interval) {
-                    console.log('Impostazione dell\'aggiornamento automatico del resolver');
-                    PythonResolver.scheduleUpdate(decodedConfig.resolver_update_interval);
+                    pythonResolver.scheduleUpdate(decodedConfig.resolver_update_interval);
                 }
+                logger.log(sessionKey, 'Resolver initialized from config');
             } catch (resolverError) {
-                console.error('Errore nell\'inizializzazione dello script Resolver:', resolverError);
+                logger.error(sessionKey, 'Resolver init error:', resolverError.message);
             }
         }
-        // Inizializza il generatore Python se configurato
         if (decodedConfig.python_script_url) {
-            console.log('Inizializzazione Script Python Generatore dalla configurazione');
             try {
-                // Scarica lo script Python se non già scaricato
-                await PythonRunner.downloadScript(decodedConfig.python_script_url);
-
-                // Se è stato definito un intervallo di aggiornamento, impostalo
+                await pythonRunner.downloadScript(decodedConfig.python_script_url);
                 if (decodedConfig.python_update_interval) {
-                    console.log('Impostazione dell\'aggiornamento automatico del generatore Python');
-                    PythonRunner.scheduleUpdate(decodedConfig.python_update_interval);
+                    pythonRunner.scheduleUpdate(decodedConfig.python_update_interval, cacheManager);
                 }
+                logger.log(sessionKey, 'Python generator initialized from config');
             } catch (pythonError) {
-                console.error('Errore nell\'inizializzazione dello script Python:', pythonError);
+                logger.error(sessionKey, 'Python generator init error:', pythonError.message);
             }
         }
 
-        const { genres } = global.CacheManager.getCachedData();
+        const genres = getGenreOptions(cacheManager);
         const manifestConfig = {
             ...config.manifest,
             catalogs: [{
@@ -196,31 +340,113 @@ app.get('/:config/manifest.json', async (req, res) => {
         const builder = new addonBuilder(manifestConfig);
 
         if (decodedConfig.epg_enabled === 'true') {
-            // Se non è stato fornito manualmente un EPG URL, usa quello della playlist
             const epgToUse = decodedConfig.epg ||
-                (global.CacheManager.getCachedData().epgUrls &&
-                    global.CacheManager.getCachedData().epgUrls.length > 0
-                    ? global.CacheManager.getCachedData().epgUrls.join(',')
-                    : null);
-
-            if (epgToUse) {
-                await EPGManager.initializeEPG(epgToUse);
-            }
+                (cacheManager.getCachedData().epgUrls && cacheManager.getCachedData().epgUrls.length > 0
+                    ? cacheManager.getCachedData().epgUrls.join(',') : null);
+            if (epgToUse) await epgManager.initializeEPG(epgToUse);
         }
 
-        builder.defineCatalogHandler(async (args) => catalogHandler({ ...args, config: decodedConfig }));
-        builder.defineStreamHandler(async (args) => streamHandler({ ...args, config: decodedConfig }));
-        builder.defineMetaHandler(async (args) => metaHandler({ ...args, config: decodedConfig }));
+        builder.defineCatalogHandler(async (args) => catalogHandler({ ...args, config: decodedConfig, cacheManager, epgManager, pythonResolver, pythonRunner }));
+        builder.defineStreamHandler(async (args) => streamHandler({ ...args, config: decodedConfig, cacheManager, epgManager, pythonResolver, pythonRunner }));
+        builder.defineMetaHandler(async (args) => metaHandler({ ...args, config: decodedConfig, cacheManager, epgManager, pythonResolver, pythonRunner }));
 
         res.setHeader('Content-Type', 'application/json');
         res.send(builder.getInterface().manifest);
     } catch (error) {
-        console.error('Error creating manifest:', error);
+        logger.error(cacheManager?.sessionKey ?? '_', 'Error creating manifest:', error.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
-// Manteniamo la route esistente per gli altri endpoint
+// Route con config in path DEVONO stare prima della route generica :resource/:type/:id
+// altrimenti Stremio che chiama /<base64>/catalog/... matcha la generica e usa req.query vuoto → 0 canali
+app.get('/:config/catalog/:type/:id/:extra?.json', async (req, res) => {
+    try {
+        const configString = Buffer.from(req.params.config, 'base64').toString();
+        const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
+        const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
+        const extra = req.params.extra ? safeParseExtra(req.params.extra) : {};
+
+        const result = await catalogHandler({
+            type: req.params.type,
+            id: req.params.id,
+            extra,
+            config: decodedConfig,
+            cacheManager,
+            epgManager,
+            pythonResolver,
+            pythonRunner
+        });
+
+        res.setHeader('Content-Type', 'application/json');
+        res.send(result);
+    } catch (error) {
+        logger.error(cacheManager?.sessionKey ?? '_', 'Error handling catalog request:', error.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+app.get('/:config/stream/:type/:id.json', async (req, res) => {
+    try {
+        const configString = Buffer.from(req.params.config, 'base64').toString();
+        const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
+        const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
+
+        const result = await streamHandler({
+            type: req.params.type,
+            id: req.params.id,
+            config: decodedConfig,
+            cacheManager,
+            epgManager,
+            pythonResolver,
+            pythonRunner
+        });
+
+        res.setHeader('Content-Type', 'application/json');
+        res.send(result);
+    } catch (error) {
+        logger.error(cacheManager?.sessionKey ?? '_', 'Error handling stream request:', error.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+app.get('/:config/meta/:type/:id.json', async (req, res) => {
+    try {
+        const configString = Buffer.from(req.params.config, 'base64').toString();
+        const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
+        const cacheManager = await getCacheManager(decodedConfig.session_id, decodedConfig);
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
+
+        const result = await metaHandler({
+            type: req.params.type,
+            id: req.params.id,
+            config: decodedConfig,
+            cacheManager,
+            epgManager,
+            pythonResolver,
+            pythonRunner
+        });
+
+        res.setHeader('Content-Type', 'application/json');
+        res.send(result);
+    } catch (error) {
+        logger.error(cacheManager?.sessionKey ?? '_', 'Error handling meta request:', error.message);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// Route generica per catalog/stream/meta (solo URL senza config in path, es. ?m3u=...)
 app.get('/:resource/:type/:id/:extra?.json', async (req, res, next) => {
     const { resource, type, id } = req.params;
     const extra = req.params.extra
@@ -228,16 +454,21 @@ app.get('/:resource/:type/:id/:extra?.json', async (req, res, next) => {
         : {};
 
     try {
+        const cacheManager = await getCacheManager(req.query.session_id, req.query);
+        const sessionKey = cacheManager.sessionKey;
+        const epgManager = await getEPGManager(sessionKey);
+        const pythonResolver = getPythonResolver(sessionKey);
+        const pythonRunner = getPythonRunner(sessionKey);
         let result;
         switch (resource) {
             case 'stream':
-                result = await streamHandler({ type, id, config: req.query });
+                result = await streamHandler({ type, id, config: req.query, cacheManager, epgManager, pythonResolver, pythonRunner });
                 break;
             case 'catalog':
-                result = await catalogHandler({ type, id, extra, config: req.query });
+                result = await catalogHandler({ type, id, extra, config: req.query, cacheManager, epgManager, pythonResolver, pythonRunner });
                 break;
             case 'meta':
-                result = await metaHandler({ type, id, config: req.query });
+                result = await metaHandler({ type, id, config: req.query, cacheManager, epgManager, pythonResolver, pythonRunner });
                 break;
             default:
                 next();
@@ -247,14 +478,14 @@ app.get('/:resource/:type/:id/:extra?.json', async (req, res, next) => {
         res.setHeader('Content-Type', 'application/json');
         res.send(result);
     } catch (error) {
-        console.error('Error handling request:', error);
+        logger.error(cacheManager?.sessionKey ?? '_', 'Error handling request:', error.message);
         res.status(500).json({ error: 'Internal server error' });
     }
 });
 
 //route download template
 app.get('/api/resolver/download-template', (req, res) => {
-    const PythonResolver = require('./python-resolver');
+    const PythonResolver = require('./src/python-resolver');
     const fs = require('fs');
 
     try {
@@ -263,48 +494,39 @@ app.get('/api/resolver/download-template', (req, res) => {
             res.setHeader('Content-Disposition', 'attachment; filename="resolver_script.py"');
             res.sendFile(PythonResolver.scriptPath);
         } else {
-            res.status(404).json({ success: false, message: 'Template non trovato. Crealo prima con la funzione "Crea Template".' });
+            res.status(404).json({ success: false, message: 'Template not found. Create it first with "Create Template".' });
         }
     } catch (error) {
-        console.error('Errore nel download del template:', error);
+        logger.error('_', 'Template download error:', error.message);
         res.status(500).json({ success: false, message: error.message });
     }
 });
 
 function cleanupTempFolder() {
-    console.log('\n=== Pulizia cartella temp all\'avvio ===');
     const tempDir = path.join(__dirname, 'temp');
-
-    // Controlla se la cartella temp esiste
     if (!fs.existsSync(tempDir)) {
-        console.log('Cartella temp non trovata, la creo...');
         fs.mkdirSync(tempDir, { recursive: true });
         return;
     }
-
     try {
-        // Leggi tutti i file nella cartella temp
         const files = fs.readdirSync(tempDir);
         let deletedCount = 0;
-
-        // Elimina ogni file
         for (const file of files) {
             try {
                 const filePath = path.join(tempDir, file);
-                // Controlla se è un file e non una cartella
                 if (fs.statSync(filePath).isFile()) {
                     fs.unlinkSync(filePath);
                     deletedCount++;
                 }
             } catch (fileError) {
-                console.error(`❌ Errore nell'eliminazione del file ${file}:`, fileError.message);
+                logger.error('_', 'Temp file delete error:', file, fileError.message);
             }
         }
-
-        console.log(`✓ Eliminati ${deletedCount} file temporanei`);
-        console.log('=== Pulizia cartella temp completata ===\n');
+        if (deletedCount > 0) {
+            logger.log('_', 'Temp folder cleanup: removed', deletedCount, 'file(s)');
+        }
     } catch (error) {
-        console.error('❌ Errore nella pulizia della cartella temp:', error.message);
+        logger.error('_', 'Temp folder cleanup error:', error.message);
     }
 }
 
@@ -344,140 +566,82 @@ function safeParseExtra(extraParam) {
             return {};
         }
     } catch (error) {
-        console.error('Error parsing extra:', error);
+        logger.error('_', 'Error parsing extra:', error.message);
         return {};
     }
 }
 
-// Per il catalog con config codificato
-app.get('/:config/catalog/:type/:id/:extra?.json', async (req, res) => {
-    try {
-        const configString = Buffer.from(req.params.config, 'base64').toString();
-        const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
-        const extra = req.params.extra
-            ? safeParseExtra(req.params.extra)
-            : {};
-
-        const result = await catalogHandler({
-            type: req.params.type,
-            id: req.params.id,
-            extra,
-            config: decodedConfig
-        });
-
-        res.setHeader('Content-Type', 'application/json');
-        res.send(result);
-    } catch (error) {
-        console.error('Error handling catalog request:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// Per lo stream con config codificato
-app.get('/:config/stream/:type/:id.json', async (req, res) => {
-    try {
-        const configString = Buffer.from(req.params.config, 'base64').toString();
-        const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
-
-        const result = await streamHandler({
-            type: req.params.type,
-            id: req.params.id,
-            config: decodedConfig
-        });
-
-        res.setHeader('Content-Type', 'application/json');
-        res.send(result);
-    } catch (error) {
-        console.error('Error handling stream request:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// Per il meta con config codificato
-app.get('/:config/meta/:type/:id.json', async (req, res) => {
-    try {
-        const configString = Buffer.from(req.params.config, 'base64').toString();
-        const decodedConfig = Object.fromEntries(new URLSearchParams(configString));
-
-        const result = await metaHandler({
-            type: req.params.type,
-            id: req.params.id,
-            config: decodedConfig
-        });
-
-        res.setHeader('Content-Type', 'application/json');
-        res.send(result);
-    } catch (error) {
-        console.error('Error handling meta request:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// Route per servire il file M3U generato
+// Route per servire il file M3U generato (opzionale session_key in query per sessione)
 app.get('/generated-m3u', (req, res) => {
-    const m3uContent = PythonRunner.getM3UContent();
+    const sessionKey = req.query.session_key || '_default';
+    touchSession(sessionKey);
+    const runner = getPythonRunner(sessionKey);
+    const m3uContent = runner.getM3UContent();
     if (m3uContent) {
         res.setHeader('Content-Type', 'text/plain');
         res.send(m3uContent);
     } else {
-        res.status(404).send('File M3U non trovato. Eseguire prima lo script Python.');
+        res.status(404).send('M3U file not found. Run the Python script first.');
     }
 });
 
 app.post('/api/resolver', async (req, res) => {
     const { action, url, interval } = req.body;
+    const sessionKey = getSessionKeyFromConfig(req.body);
+    touchSession(sessionKey);
+    const resolver = getPythonResolver(sessionKey);
 
     try {
         if (action === 'download' && url) {
-            const success = await PythonResolver.downloadScript(url);
+            const success = await resolver.downloadScript(url);
             if (success) {
-                res.json({ success: true, message: 'Script resolver scaricato con successo' });
+                res.json({ success: true, message: 'Resolver script downloaded successfully' });
             } else {
-                res.status(500).json({ success: false, message: PythonResolver.getStatus().lastError });
+                res.status(500).json({ success: false, message: resolver.getStatus().lastError });
             }
         } else if (action === 'create-template') {
-            const success = await PythonResolver.createScriptTemplate();
+            const success = await resolver.createScriptTemplate();
             if (success) {
                 res.json({
                     success: true,
-                    message: 'Template script resolver creato con successo',
-                    scriptPath: PythonResolver.scriptPath
+                    message: 'Resolver script template created successfully',
+                    scriptPath: resolver.scriptPath
                 });
             } else {
-                res.status(500).json({ success: false, message: PythonResolver.getStatus().lastError });
+                res.status(500).json({ success: false, message: resolver.getStatus().lastError });
             }
         } else if (action === 'check-health') {
-            const isHealthy = await PythonResolver.checkScriptHealth();
+            const isHealthy = await resolver.checkScriptHealth();
             res.json({
                 success: isHealthy,
-                message: isHealthy ? 'Script resolver valido' : PythonResolver.getStatus().lastError
+                message: isHealthy ? 'Resolver script valid' : resolver.getStatus().lastError
             });
         } else if (action === 'status') {
-            res.json(PythonResolver.getStatus());
+            res.json(resolver.getStatus());
         } else if (action === 'clear-cache') {
-            PythonResolver.clearCache();
-            res.json({ success: true, message: 'Cache resolver svuotata' });
+            resolver.clearCache();
+            res.json({ success: true, message: 'Resolver cache cleared' });
         } else if (action === 'schedule' && interval) {
-            const success = PythonResolver.scheduleUpdate(interval);
+            const success = resolver.scheduleUpdate(interval);
             if (success) {
                 res.json({
                     success: true,
-                    message: `Aggiornamento automatico impostato ogni ${interval}`
+                    message: `Auto-update set every ${interval}`
                 });
             } else {
-                res.status(500).json({ success: false, message: PythonResolver.getStatus().lastError });
+                res.status(500).json({ success: false, message: resolver.getStatus().lastError });
             }
         } else if (action === 'stopSchedule') {
-            const stopped = PythonResolver.stopScheduledUpdates();
+            const stopped = resolver.stopScheduledUpdates();
             res.json({
                 success: true,
-                message: stopped ? 'Aggiornamento automatico fermato' : 'Nessun aggiornamento pianificato da fermare'
+                message: stopped ? 'Auto-update stopped' : 'No scheduled update to stop'
             });
         } else {
             res.status(400).json({ success: false, message: 'Azione non valida' });
         }
     } catch (error) {
-        console.error('Errore API Resolver:', error);
+        logger.error(sessionKey, 'Resolver API error:', error.message);
         res.status(500).json({ success: false, message: error.message });
     }
 });
@@ -486,97 +650,107 @@ app.post('/api/rebuild-cache', async (req, res) => {
     try {
         const m3uUrl = req.body.m3u;
         if (!m3uUrl) {
-            return res.status(400).json({ success: false, message: 'URL M3U richiesto' });
+            return res.status(400).json({ success: false, message: 'M3U URL required' });
         }
 
-        console.log('🔄 Richiesta di ricostruzione cache ricevuta');
-        await global.CacheManager.rebuildCache(req.body.m3u, req.body);
+        const cacheManager = await getCacheManager(req.body.session_id, req.body);
+        logger.log(cacheManager.sessionKey, 'Rebuild cache requested');
+        await cacheManager.rebuildCache(req.body.m3u, req.body);
 
         if (req.body.epg_enabled === 'true') {
-            console.log('📡 Ricostruzione EPG in corso...');
+            const epgManager = await getEPGManager(cacheManager.sessionKey);
             const epgToUse = req.body.epg ||
-                (global.CacheManager.getCachedData().epgUrls && global.CacheManager.getCachedData().epgUrls.length > 0
-                    ? global.CacheManager.getCachedData().epgUrls.join(',')
+                (cacheManager.getCachedData().epgUrls && cacheManager.getCachedData().epgUrls.length > 0
+                    ? cacheManager.getCachedData().epgUrls.join(',')
                     : null);
             if (epgToUse) {
-                await EPGManager.initializeEPG(epgToUse);
+                await epgManager.initializeEPG(epgToUse);
             }
         }
 
-        res.json({ success: true, message: 'Cache e EPG ricostruiti con successo' });
+        res.json({ success: true, message: 'Cache and EPG rebuilt successfully' });
 
     } catch (error) {
-        console.error('Errore nella ricostruzione della cache:', error);
+        logger.error(cacheManager?.sessionKey ?? '_', 'Rebuild cache error:', error.message);
         res.status(500).json({ success: false, message: error.message });
     }
 });
 
-// Endpoint API per le operazioni sullo script Python
+// Endpoint API per le operazioni sullo script Python (sessione da body)
 app.post('/api/python-script', async (req, res) => {
     const { action, url, interval } = req.body;
+    const sessionKey = getSessionKeyFromConfig(req.body);
+    touchSession(sessionKey);
+    const runner = getPythonRunner(sessionKey);
+    const cacheManager = await getCacheManager(req.body?.session_id, req.body || {});
 
     try {
         if (action === 'download' && url) {
-            const success = await PythonRunner.downloadScript(url);
+            const success = await runner.downloadScript(url);
             if (success) {
-                res.json({ success: true, message: 'Script scaricato con successo' });
+                res.json({ success: true, message: 'Script downloaded successfully' });
             } else {
-                res.status(500).json({ success: false, message: PythonRunner.getStatus().lastError });
+                res.status(500).json({ success: false, message: runner.getStatus().lastError });
             }
         } else if (action === 'execute') {
-            const success = await PythonRunner.executeScript();
+            const success = await runner.executeScript();
             if (success) {
+                const m3uUrl = `${req.protocol}://${req.get('host')}/generated-m3u` + (sessionKey !== '_default' ? `?session_key=${encodeURIComponent(sessionKey)}` : '');
                 res.json({
                     success: true,
-                    message: 'Script eseguito con successo',
-                    m3uUrl: `${req.protocol}://${req.get('host')}/generated-m3u`
+                    message: 'Script executed successfully',
+                    m3uUrl
                 });
             } else {
-                res.status(500).json({ success: false, message: PythonRunner.getStatus().lastError });
+                res.status(500).json({ success: false, message: runner.getStatus().lastError });
             }
         } else if (action === 'status') {
-            res.json(PythonRunner.getStatus());
+            const status = runner.getStatus();
+            if (status.m3uExists) {
+                status.m3uUrl = `${req.protocol}://${req.get('host')}/generated-m3u` + (sessionKey !== '_default' ? `?session_key=${encodeURIComponent(sessionKey)}` : '');
+            }
+            res.json(status);
         } else if (action === 'schedule' && interval) {
-            const success = PythonRunner.scheduleUpdate(interval);
+            const success = runner.scheduleUpdate(interval, cacheManager);
             if (success) {
                 res.json({
                     success: true,
-                    message: `Aggiornamento automatico impostato ogni ${interval}`
+                    message: `Auto-update set every ${interval}`
                 });
             } else {
-                res.status(500).json({ success: false, message: PythonRunner.getStatus().lastError });
+                res.status(500).json({ success: false, message: runner.getStatus().lastError });
             }
         } else if (action === 'stopSchedule') {
-            const stopped = PythonRunner.stopScheduledUpdates();
+            const stopped = runner.stopScheduledUpdates();
             res.json({
                 success: true,
-                message: stopped ? 'Aggiornamento automatico fermato' : 'Nessun aggiornamento pianificato da fermare'
+                message: stopped ? 'Auto-update stopped' : 'No scheduled update to stop'
             });
         } else {
             res.status(400).json({ success: false, message: 'Azione non valida' });
         }
     } catch (error) {
-        console.error('Errore API Python:', error);
+        logger.error(sessionKey, 'Python script API error:', error.message);
         res.status(500).json({ success: false, message: error.message });
     }
 });
 async function startAddon() {
     cleanupTempFolder();
 
-    // Inizializza CacheManager
-    global.CacheManager = await CacheManagerFactory(config);
+    // Inizializza CacheManager di default (per compatibilità e python-runner)
+    global.CacheManager = await getCacheManager(null, config);
+
+    // Timer scadenza sessioni: ogni 15 minuti controlla e rimuove sessioni inattive da 24h
+    setInterval(cleanupExpiredSessions, 15 * 60 * 1000);
+    logger.log('_', 'Session expiry timer active (24h inactivity, check every 15 min)');
 
     try {
         const port = process.env.PORT || 10000;
         app.listen(port, () => {
-            console.log('=============================\n');
-            console.log('OMG ADDON Avviato con successo');
-            console.log('Visita la pagina web per generare la configurazione del manifest e installarla su stremio');
-            console.log('Link alla pagina di configurazione:', `http://localhost:${port}`);
-            console.log('=============================\n');
+            logger.log('_', 'OMG addon started. Config page: http://localhost:' + port);
         });
     } catch (error) {
-        console.error('Failed to start addon:', error);
+        logger.error('_', 'Failed to start addon:', error.message);
         process.exit(1);
     }
 }

@@ -5,10 +5,19 @@ const { exec } = require('child_process');
 const { promisify } = require('util');
 const execAsync = promisify(exec);
 const cron = require('node-cron');
+const crypto = require('crypto');
+const logger = require('./logger');
+
+function safeResolverScriptName(sessionKey) {
+    if (!sessionKey || sessionKey === '_default') return 'resolver_script.py';
+    const hash = crypto.createHash('sha256').update(String(sessionKey)).digest('hex').slice(0, 16);
+    return path.join(__dirname, '..', 'temp', `resolver_${hash}.py`);
+}
 
 class PythonResolver {
-    constructor() {
-        this.scriptPath = path.join(__dirname, 'resolver_script.py');
+    constructor(sessionKey = null) {
+        this.sessionKey = sessionKey;
+        this.scriptPath = sessionKey ? safeResolverScriptName(sessionKey) : path.join(__dirname, '..', 'resolver_script.py');
         this.resolvedLinksCache = new Map();
         this.cacheExpiryTime = 20 * 60 * 1000; // 20 minuti di cache per i link risolti
         this.lastExecution = null;
@@ -18,11 +27,9 @@ class PythonResolver {
         this.cronJob = null;
         this.updateInterval = null;
         this.pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
-        
-        // Crea la directory temp se non esiste
-        if (!fs.existsSync(path.join(__dirname, 'temp'))) {
-            fs.mkdirSync(path.join(__dirname, 'temp'));
-        }
+
+        const tempDir = path.join(__dirname, '..', 'temp');
+        if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
     }
 
     /**
@@ -32,22 +39,18 @@ class PythonResolver {
      */
     async downloadScript(url) {
         try {
-            console.log(`\n=== Download script Python resolver da ${url} ===`);
             this.scriptUrl = url;
-            
             const response = await axios.get(url, { responseType: 'text' });
             fs.writeFileSync(this.scriptPath, response.data);
-            
-            // Verifica che lo script contenga la funzione resolve_link
             if (!response.data.includes('def resolve_link') && !response.data.includes('def resolve_stream')) {
-                this.lastError = 'Lo script deve contenere una funzione resolve_link o resolve_stream';
-                console.error(`❌ ${this.lastError}`);
+                this.lastError = 'Script must define resolve_link or resolve_stream';
+                logger.error(this.sessionKey, this.lastError);
                 return false;
             }
-            
+            logger.log(this.sessionKey, 'Resolver script downloaded');
             return true;
         } catch (error) {
-            console.error('❌ Errore durante il download dello script Python resolver:', error.message);
+            logger.error(this.sessionKey, 'Resolver script download error:', error.message);
             this.lastError = `Errore download: ${error.message}`;
             return false;
         }
@@ -59,7 +62,7 @@ class PythonResolver {
      */
     async checkScriptHealth() {
         if (!fs.existsSync(this.scriptPath)) {
-            console.error('❌ Script Python resolver non trovato');
+            logger.error(this.sessionKey, 'Resolver script not found');
             this.lastError = 'Script Python resolver non trovato';
             return false;
         }
@@ -72,12 +75,11 @@ class PythonResolver {
             const { stdout, stderr } = await execAsync(`${this.pythonCmd} ${this.scriptPath} --check`);
             
             if (stderr && !stderr.includes('resolver_ready')) {
-                console.warn('⚠️ Warning durante la verifica dello script:', stderr);
+                logger.warn(this.sessionKey, 'Resolver check stderr:', stderr.slice(0, 200));
             }
-            
             return stdout.includes('resolver_ready') || stderr.includes('resolver_ready');
         } catch (error) {
-            console.error('❌ Errore durante la verifica dello script resolver:', error.message);
+            logger.error(this.sessionKey, 'Resolver script check error:', error.message);
             this.lastError = `Errore verifica: ${error.message}`;
             return false;
         }
@@ -97,12 +99,12 @@ class PythonResolver {
         const cacheKey = `${url}:${JSON.stringify(headers)}`;
         const cachedResult = this.resolvedLinksCache.get(cacheKey);
         if (cachedResult && (Date.now() - cachedResult.timestamp) < this.cacheExpiryTime) {
-            console.log(`✓ Usando URL in cache per: ${channelName}`);
+            logger.log(this.sessionKey, 'Using cached URL for:', channelName);
             return cachedResult.data;
         }
     
         if (!fs.existsSync(this.scriptPath)) {
-            console.error('❌ Script Python resolver non trovato');
+            logger.error(this.sessionKey, 'Resolver script not found');
             this.lastError = 'Script Python resolver non trovato';
             return null;
         }
@@ -113,7 +115,6 @@ class PythonResolver {
     
         try {
             this.isRunning = true;
-            console.log(`\n=== Risoluzione URL per: ${channelName} ===`);
     
             // Crea un file temporaneo con i parametri di input
             const inputParams = {
@@ -123,8 +124,8 @@ class PythonResolver {
                 proxy_config: proxyConfig // Aggiungi la configurazione del proxy
             };
             
-            const inputFile = path.join(__dirname, 'temp', `input_${Date.now()}.json`);
-            const outputFile = path.join(__dirname, 'temp', `output_${Date.now()}.json`);
+            const inputFile = path.join(__dirname, '..', 'temp', `input_${Date.now()}.json`);
+            const outputFile = path.join(__dirname, '..', 'temp', `output_${Date.now()}.json`);
             
             fs.writeFileSync(inputFile, JSON.stringify(inputParams, null, 2));
             
@@ -134,7 +135,7 @@ class PythonResolver {
             const { stdout, stderr } = await execAsync(cmd);
             
             if (stderr) {
-                console.warn('⚠️ Warning durante la risoluzione:', stderr);
+                logger.warn(this.sessionKey, 'Resolver stderr:', stderr.slice(0, 200));
             }
             
             // Leggi il risultato
@@ -152,7 +153,7 @@ class PythonResolver {
                     
                     this.lastExecution = new Date();
                     this.lastError = null;
-                    console.log(`✓ URL risolto per ${channelName}`);
+                    logger.log(this.sessionKey, 'URL resolved for', channelName);
     
     
                     // Elimina i file temporanei
@@ -160,24 +161,22 @@ class PythonResolver {
                         fs.unlinkSync(inputFile);
                         fs.unlinkSync(outputFile);
                     } catch (e) {
-                        console.error('Errore nella pulizia dei file temporanei:', e.message);
+                        logger.error(this.sessionKey, 'Temp file cleanup error:', e.message);
                     }
                     return result;
                     
                 } catch (parseError) {
-                    console.error('❌ Errore nel parsing del risultato:', parseError.message);
-                    console.error('Contenuto risultato:', resultText);
+                    logger.error(this.sessionKey, 'Resolver output parse error:', parseError.message);
                     this.lastError = `Errore parsing: ${parseError.message}`;
                     return null;
                 }
             } else {
-                console.error('❌ File di output non creato');
+                logger.error(this.sessionKey, 'Resolver output file not created');
                 this.lastError = 'File di output non creato';
                 return null;
             }
         } catch (error) {
-            console.error('❌ Errore durante la risoluzione URL:', error.message);
-            if (error.stderr) console.error('Stderr:', error.stderr);
+            logger.error(this.sessionKey, 'Resolver error:', error.message);
             this.lastError = `Errore esecuzione: ${error.message}`;
             return null;
         } finally {
@@ -196,7 +195,7 @@ class PythonResolver {
         
         // Validazione del formato orario
         if (!timeFormat || !/^\d{1,2}:\d{2}$/.test(timeFormat)) {
-            console.error('❌ [RESOLVER] Formato orario non valido. Usa HH:MM o H:MM');
+            logger.error(this.sessionKey, '[RESOLVER] Invalid time format, use HH:MM or H:MM');
             this.lastError = 'Formato orario non valido. Usa HH:MM o H:MM';
             return false;
         }
@@ -206,7 +205,7 @@ class PythonResolver {
             const [hours, minutes] = timeFormat.split(':').map(Number);
             
             if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) {
-                console.error('❌ [RESOLVER] Orario non valido. Ore: 0-23, Minuti: 0-59');
+                logger.error(this.sessionKey, '[RESOLVER] Invalid time, hours: 0-23, minutes: 0-59');
                 this.lastError = 'Orario non valido. Ore: 0-23, Minuti: 0-59';
                 return false;
             }
@@ -217,15 +216,15 @@ class PythonResolver {
             if (hours === 0) {
                 // Esegui ogni X minuti
                 cronExpression = `*/${minutes} * * * *`;
-                console.log(`✓ [RESOLVER] Pianificazione impostata: ogni ${minutes} minuti`);
+                logger.log(this.sessionKey, '[RESOLVER] Schedule set: every', minutes, 'min');
             } else {
                 // Esegui ogni X ore
                 cronExpression = `${minutes} */${hours} * * *`;
-                console.log(`✓ [RESOLVER] Pianificazione impostata: ogni ${hours} ore e ${minutes} minuti`);
+                logger.log(this.sessionKey, '[RESOLVER] Schedule set: every', hours, 'h', minutes, 'min');
             }
             
             this.cronJob = cron.schedule(cronExpression, async () => {
-                console.log(`\n=== [RESOLVER] Aggiornamento automatico script resolver (${new Date().toLocaleString()}) ===`);
+                logger.log(this.sessionKey, '[RESOLVER] Scheduled resolver update');
                 if (this.scriptUrl) {
                     await this.downloadScript(this.scriptUrl);
                 }
@@ -234,10 +233,10 @@ class PythonResolver {
             });
             
             this.updateInterval = timeFormat;
-            console.log(`✓ [RESOLVER] Aggiornamento automatico configurato: ${timeFormat}`);
+            logger.log(this.sessionKey, '[RESOLVER] Auto-update configured:', timeFormat);
             return true;
         } catch (error) {
-            console.error('❌ [RESOLVER] Errore nella pianificazione:', error.message);
+            logger.error(this.sessionKey, '[RESOLVER] Schedule error:', error.message);
             this.lastError = `Errore nella pianificazione: ${error.message}`;
             return false;
         }
@@ -251,7 +250,7 @@ class PythonResolver {
             this.cronJob.stop();
             this.cronJob = null;
             this.updateInterval = null;
-            console.log('✓ Aggiornamento automatico fermato');
+            logger.log(this.sessionKey, 'Resolver auto-update stopped');
             return true;
         }
         return false;
@@ -262,7 +261,7 @@ class PythonResolver {
      */
     clearCache() {
         this.resolvedLinksCache.clear();
-        console.log('✓ Cache dei link risolti svuotata');
+        logger.log(this.sessionKey, 'Resolver cache cleared');
         return true;
     }
 
@@ -408,10 +407,10 @@ if __name__ == "__main__":
 `;
             
             fs.writeFileSync(this.scriptPath, templateContent);
-            console.log('✓ Template dello script resolver creato con successo');
+            logger.log(this.sessionKey, 'Resolver template created');
             return true;
         } catch (error) {
-            console.error('❌ Errore nella creazione del template:', error.message);
+            logger.error(this.sessionKey, 'Resolver template creation error:', error.message);
             this.lastError = `Errore creazione template: ${error.message}`;
             return false;
         }
@@ -449,7 +448,7 @@ if __name__ == "__main__":
             }
             return 'N/A';
         } catch (error) {
-            console.error('Errore nella lettura della versione:', error.message);
+            logger.error(this.sessionKey, 'Resolver version read error:', error.message);
             return 'Errore';
         }
     }
@@ -471,4 +470,38 @@ if __name__ == "__main__":
     }
 }
 
-module.exports = new PythonResolver();
+const registry = new Map();
+const defaultInstance = new PythonResolver();
+
+function getPythonResolver(sessionKey) {
+    const key = (sessionKey && String(sessionKey).trim()) ? String(sessionKey).trim() : '_default';
+    if (key === '_default') return defaultInstance;
+    if (!registry.has(key)) registry.set(key, new PythonResolver(key));
+    return registry.get(key);
+}
+
+/**
+ * Rimuove una sessione resolver (cron, script su disco). Non usare per _default.
+ * @param {string} sessionKey
+ */
+function removeResolverSession(sessionKey) {
+    const key = (sessionKey && String(sessionKey).trim()) ? String(sessionKey).trim() : '_default';
+    if (key === '_default') return;
+    const instance = registry.get(key);
+    if (!instance) return;
+    try {
+        instance.stopScheduledUpdates();
+        if (instance.scriptPath && fs.existsSync(instance.scriptPath)) {
+            fs.unlinkSync(instance.scriptPath);
+            logger.log(key, 'Resolver session removed:', instance.scriptPath);
+        }
+        instance.resolvedLinksCache.clear();
+    } catch (e) {
+        logger.error(key, 'Resolver session removal error:', e.message);
+    }
+    registry.delete(key);
+}
+
+module.exports = defaultInstance;
+module.exports.getPythonResolver = getPythonResolver;
+module.exports.removeResolverSession = removeResolverSession;
