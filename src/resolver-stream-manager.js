@@ -1,5 +1,6 @@
 const config = require('./config');
 const PythonResolver = require('./python-resolver');
+const logger = require('./logger');
 
 function getLanguageFromConfig(userConfig) {
     return userConfig.language || config.defaultLanguage || 'Italiano';
@@ -26,43 +27,35 @@ class ResolverStreamManager {
      * @param {Object} userConfig - Configurazione utente
      * @returns {Promise<Boolean>} - true se l'inizializzazione è avvenuta con successo
      */
-    async initializeResolver(userConfig) {
+    async initializeResolver(userConfig, pythonResolverInstance = null, sessionKey = null) {
+        const sk = sessionKey || '_';
+        const resolver = pythonResolverInstance || PythonResolver;
         if (!this.isResolverConfigured(userConfig)) {
             return false;
         }
 
         try {
             const resolverScriptUrl = userConfig.resolver_script;
-            
-            // Se l'URL è già stato impostato, non scaricare di nuovo lo script
-            if (PythonResolver.scriptUrl === resolverScriptUrl) {
-                // Verifica che lo script sia funzionante
-                const isHealthy = await PythonResolver.checkScriptHealth();
+            if (resolver.scriptUrl === resolverScriptUrl) {
+                const isHealthy = await resolver.checkScriptHealth();
                 return isHealthy;
             }
-            
-            // Scarica lo script
-            const downloaded = await PythonResolver.downloadScript(resolverScriptUrl);
+            const downloaded = await resolver.downloadScript(resolverScriptUrl);
             if (!downloaded) {
-                console.error('❌ Errore nel download dello script resolver');
+                logger.error(sk, 'Resolver script download error');
                 return false;
             }
-            
-            // Verifica la salute dello script
-            const isHealthy = await PythonResolver.checkScriptHealth();
+            const isHealthy = await resolver.checkScriptHealth();
             if (!isHealthy) {
-                console.error('❌ Script resolver non valido');
+                logger.error(sk, 'Resolver script invalid');
                 return false;
             }
-            
-            // Imposta l'aggiornamento automatico se configurato
             if (userConfig.resolver_update_interval) {
-                PythonResolver.scheduleUpdate(userConfig.resolver_update_interval);
+                resolver.scheduleUpdate(userConfig.resolver_update_interval);
             }
-            
             return true;
         } catch (error) {
-            console.error('❌ Errore nell\'inizializzazione del resolver:', error.message);
+            logger.error(sk, 'Resolver init error:', error.message);
             return false;
         }
     }
@@ -103,17 +96,18 @@ class ResolverStreamManager {
      * @param {Object} userConfig - Configurazione utente
      * @returns {Promise<Array>} - Array di stream risolti
      */
-    async getResolvedStreams(input, userConfig = {}) {
+    async getResolvedStreams(input, userConfig = {}, pythonResolverInstance = null, sessionKey = null) {
+        const sk = sessionKey || '_';
+        const resolver = pythonResolverInstance || PythonResolver;
         if (!this.isResolverConfigured(userConfig)) {
-            console.log('Resolver non configurato per:', input.name);
+            logger.log(sk, 'Resolver not configured for:', input.name);
             return [];
         }
 
         let streams = [];
 
         try {
-            // Inizializza il resolver se necessario
-            await this.initializeResolver(userConfig);
+            await this.initializeResolver(userConfig, resolver, sessionKey);
             
             // Prepara la configurazione del proxy se disponibile
             let proxyConfig = null;
@@ -160,8 +154,7 @@ class ResolverStreamManager {
                             streamDetails.headers['Origin'] = origin;
                         }
                     }
-                    // Risolvi l'URL tramite lo script Python
-                    const result = await PythonResolver.resolveLink(
+                    const result = await resolver.resolveLink(
                         streamDetails.url, 
                         streamDetails.headers,
                         isChannel ? input.name : input.originalName || input.name,
@@ -170,7 +163,7 @@ class ResolverStreamManager {
 
                     // Se la risoluzione non produce un risultato, restituisci null
                     if (!result || !result.resolved_url) {
-                        console.log(`❌ Nessun risultato dal resolver per: ${streamDetails.name}`);
+                        logger.log(sk, 'No result from resolver for:', streamDetails.name);
                         return null;
                     }
                     
@@ -178,7 +171,7 @@ class ResolverStreamManager {
                     // Se l'URL è lo stesso (non è stato processato dal resolver perché non è Vavoo),
                     // restituisci comunque uno stream con l'URL originale
                     if (result.resolved_url === streamDetails.url) {
-                        console.log(`ℹ️ URL non modificato dal resolver per: ${streamDetails.name}, lo manteniamo`);
+                        logger.log(sk, 'URL unchanged by resolver for:', streamDetails.name, ', keeping it');
                         return {
                             name: `${input.originalName}`,
                             title: `📺 ${streamDetails.name} [${language.substring(0, 3).toUpperCase()}]`,
@@ -205,8 +198,8 @@ class ResolverStreamManager {
                         }
                     };
                 } catch (error) {
-                    console.error('Errore elaborazione stream:', error.message);
-                    return null; // Restituisci null per escludere questo stream
+                    logger.error(sk, 'Stream processing error:', error.message);
+                    return null;
                 }
             });
 
@@ -221,10 +214,10 @@ class ResolverStreamManager {
             return streams;
 
         } catch (error) {
-            console.error('Errore generale resolver:', error.message);
+            logger.error(sk, 'Resolver error:', error.message);
             if (error.response) {
-                console.error('Status:', error.response.status);
-                console.error('Headers:', error.response.headers);
+                logger.error(sk, 'Status:', error.response.status);
+                logger.error(sk, 'Headers:', error.response.headers);
             }
             return [];
         }
@@ -233,16 +226,12 @@ class ResolverStreamManager {
     /**
      * Cancella la cache del resolver
      */
-    clearCache() {
-        PythonResolver.clearCache();
+    clearCache(pythonResolverInstance = null) {
+        (pythonResolverInstance || PythonResolver).clearCache();
     }
 
-    /**
-     * Ottiene lo stato del resolver
-     * @returns {Object} - Stato del resolver
-     */
-    getStatus() {
-        return PythonResolver.getStatus();
+    getStatus(pythonResolverInstance = null) {
+        return (pythonResolverInstance || PythonResolver).getStatus();
     }
 }
 

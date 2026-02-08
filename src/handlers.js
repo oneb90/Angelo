@@ -1,5 +1,6 @@
 const config = require('./config');
 const EPGManager = require('./epg-manager');
+const logger = require('./logger');
 const StreamProxyManager = require('./stream-proxy-manager')(config);
 const ResolverStreamManager = require('./resolver-stream-manager')(config);
 
@@ -8,7 +9,8 @@ function getLanguageFromConfig(userConfig) {
 }
 
 function normalizeId(id) {
-    return id?.toLowerCase().replace(/[^\w.]/g, '').trim() || '';
+    const beforeAt = (typeof id === 'string' && id.includes('@')) ? id.split('@')[0] : id;
+    return beforeAt?.toLowerCase().replace(/[^\w.]/g, '').trim() || '';
 }
 
 function cleanNameForImage(name) {
@@ -47,26 +49,34 @@ function cleanNameForImage(name) {
     return cleaned || 'No Name';
 }
 
-async function catalogHandler({ type, id, extra, config: userConfig }) {
+async function catalogHandler({ type, id, extra, config: userConfig, cacheManager: cm, epgManager: em, pythonResolver, pythonRunner }) {
+    const cacheManager = cm || global.CacheManager;
+    const epgManager = em || require('./epg-manager');
     try {
         if (!userConfig.m3u) {
-            console.log('[Handlers] URL M3U mancante nella configurazione');
+            logger.log(cacheManager?.sessionKey ?? '_', 'M3U URL missing in configuration');
             return { metas: [], genres: [] };
         }
 
         // Aggiorna sempre la configurazione
-        await global.CacheManager.updateConfig(userConfig);
+        await cacheManager.updateConfig(userConfig);
 
-        // Se l'EPG è abilitato, inizializzalo
+        const cacheEmpty = !cacheManager.cache?.stremioData?.channels?.length;
+        if (cacheEmpty && userConfig.m3u && cacheManager.cache.m3uUrl !== userConfig.m3u) {
+            logger.log(cacheManager?.sessionKey ?? '_', 'Catalog: cache empty, rebuilding playlist from M3U...');
+            await cacheManager.rebuildCache(userConfig.m3u, userConfig);
+        }
+
+        // Se l'EPG è abilitato, inizializzalo con l'epgManager della sessione (non quello default)
         if (userConfig.epg_enabled === 'true') {
             const epgToUse = userConfig.epg ||
-                (global.CacheManager.cache.epgUrls &&
-                    global.CacheManager.cache.epgUrls.length > 0
-                    ? global.CacheManager.cache.epgUrls.join(',')
+                (cacheManager.cache.epgUrls &&
+                    cacheManager.cache.epgUrls.length > 0
+                    ? cacheManager.cache.epgUrls.join(',')
                     : null);
 
             if (epgToUse) {
-                await EPGManager.initializeEPG(epgToUse);
+                await epgManager.initializeEPG(epgToUse);
             }
         }
 
@@ -82,20 +92,20 @@ async function catalogHandler({ type, id, extra, config: userConfig }) {
 
         // Se riceviamo un nuovo filtro (search o genre), lo salviamo
         if (search) {
-            global.CacheManager.setLastFilter('search', search);
+            cacheManager.setLastFilter('search', search);
         } else if (genre) {
-            global.CacheManager.setLastFilter('genre', genre);
+            cacheManager.setLastFilter('genre', genre);
         } else if (!skip) {
             // Se non c'è skip, significa che è una nuova richiesta senza filtri
-            global.CacheManager.clearLastFilter();
+            cacheManager.clearLastFilter();
         }
 
         skip = parseInt(skip) || 0;
         const ITEMS_PER_PAGE = 100;
 
         // Otteniamo i canali già filtrati
-        let filteredChannels = global.CacheManager.getFilteredChannels();
-        const cachedData = global.CacheManager.getCachedData();
+        let filteredChannels = cacheManager.getFilteredChannels();
+        const cachedData = cacheManager.getCachedData();
 
         const paginatedChannels = filteredChannels.slice(skip, skip + ITEMS_PER_PAGE);
 
@@ -113,7 +123,7 @@ async function catalogHandler({ type, id, extra, config: userConfig }) {
                 poster: channel.poster || fallbackLogo,
                 background: channel.background || fallbackLogo,
                 logo: channel.logo || fallbackLogo,
-                description: channel.description || `Canale: ${channel.name} - ID: ${channel.streamInfo?.tvg?.id}`,
+                description: channel.description || `Channel: ${channel.name} - ID: ${channel.streamInfo?.tvg?.id}`,
                 genre: channel.genre,
                 posterShape: channel.posterShape || 'square',
                 releaseInfo: 'LIVE',
@@ -129,7 +139,7 @@ async function catalogHandler({ type, id, extra, config: userConfig }) {
             }
 
             if ((!meta.poster || !meta.background || !meta.logo) && channel.streamInfo?.tvg?.id) {
-                const epgIcon = EPGManager.getChannelIcon(channel.streamInfo.tvg.id);
+                const epgIcon = epgManager.getChannelIcon(channel.streamInfo.tvg.id);
                 if (epgIcon) {
                     meta.poster = meta.poster || epgIcon;
                     meta.background = meta.background || epgIcon;
@@ -137,29 +147,78 @@ async function catalogHandler({ type, id, extra, config: userConfig }) {
                 }
             }
 
-            return enrichWithEPG(meta, channel.streamInfo?.tvg?.id, userConfig);
+            return enrichWithEPG(meta, channel.streamInfo?.tvg?.id, userConfig, epgManager);
         });
 
-        return {
-            metas,
-            genres: cachedData.genres
-        };
+        const SETTINGS_GENRE = '⚙️';
+        const settingsLogo = 'https://raw.githubusercontent.com/mccoy88f/OMG-TV-Stremio-Addon/refs/heads/main/tv.png';
+        const languageAbbr = (getLanguageFromConfig(userConfig).substring(0, 3)).toUpperCase();
+        const pseudoChannels = [
+            { id: 'tv|refreshm3u', name: 'Refresh M3U playlist' },
+            { id: 'tv|refreshepg', name: 'Refresh EPG' }
+        ];
+        const settingsMetas = pseudoChannels.map(ch => ({
+            id: ch.id,
+            type: 'tv',
+            name: `${ch.name} [${languageAbbr}]`,
+            poster: settingsLogo,
+            background: settingsLogo,
+            logo: settingsLogo,
+            description: `Channel: ${ch.name}`,
+            genre: [SETTINGS_GENRE],
+            posterShape: 'square',
+            releaseInfo: 'LIVE',
+            behaviorHints: { isLive: true },
+            streamInfo: { tvg: { id: ch.id.replace('tv|', '') }, urls: [] }
+        }));
+        const rawGenres = cachedData.genres || [];
+        const normalizedGenres = rawGenres.map(g => (g === '~SETTINGS~' || g === 'Settings' ? SETTINGS_GENRE : g));
+        const genres = [...new Set([...normalizedGenres, SETTINGS_GENRE])];
+
+        if (genre === SETTINGS_GENRE) {
+            const settingsChannels = cacheManager.getChannelsByGenre(SETTINGS_GENRE);
+            const settingsChannelsMetas = settingsChannels.map(channel => {
+                const displayName = cleanNameForImage(channel.name);
+                const encodedName = encodeURIComponent(displayName).replace(/%20/g, '+');
+                const fallbackLogo = `https://dummyimage.com/500x500/590b8a/ffffff.jpg&text=${encodedName}`;
+                const meta = {
+                    id: channel.id,
+                    type: 'tv',
+                    name: `${channel.name} [${languageAbbr}]`,
+                    poster: channel.poster || fallbackLogo,
+                    background: channel.background || fallbackLogo,
+                    logo: channel.logo || fallbackLogo,
+                    description: channel.description || `Channel: ${channel.name}`,
+                    genre: channel.genre,
+                    posterShape: channel.posterShape || 'square',
+                    releaseInfo: 'LIVE',
+                    behaviorHints: { isLive: true, ...channel.behaviorHints },
+                    streamInfo: channel.streamInfo
+                };
+                return meta;
+            });
+            const allSettingsMetas = [...settingsChannelsMetas, ...settingsMetas];
+            const settingsPaginated = allSettingsMetas.slice(skip, skip + ITEMS_PER_PAGE);
+            return { metas: settingsPaginated, genres };
+        }
+        return { metas, genres };
 
     } catch (error) {
-        console.error('[Handlers] Errore nella gestione del catalogo:', error);
+        logger.error(cacheManager?.sessionKey ?? '_', 'Catalog handler error:', error);
         return { metas: [], genres: [] };
     }
 }
 
-function enrichWithEPG(meta, channelId, userConfig) {
+function enrichWithEPG(meta, channelId, userConfig, epgManager) {
+    const epg = epgManager || require('./epg-manager');
     if (!userConfig.epg_enabled || !channelId) {
-        meta.description = `Canale live: ${meta.name}`;
+        meta.description = `Live channel: ${meta.name}`;
         meta.releaseInfo = 'LIVE';
         return meta;
     }
 
-    const currentProgram = EPGManager.getCurrentProgram(normalizeId(channelId));
-    const upcomingPrograms = EPGManager.getUpcomingPrograms(normalizeId(channelId));
+    const currentProgram = epg.getCurrentProgram(normalizeId(channelId));
+    const upcomingPrograms = epg.getUpcomingPrograms(normalizeId(channelId));
 
     if (currentProgram) {
         meta.description = `IN ONDA ORA:\n${currentProgram.title}`;
@@ -187,66 +246,76 @@ function enrichWithEPG(meta, channelId, userConfig) {
     return meta;
 }
 
-async function streamHandler({ id, config: userConfig }) {
+const PSEUDO_CHANNEL_IDS = ['rigeneraplaylistpython', 'refreshm3u', 'refreshepg'];
+
+async function streamHandler({ id, config: userConfig, cacheManager: cm, epgManager: em, pythonResolver, pythonRunner }) {
+    const cacheManager = cm || global.CacheManager;
+    const epgManager = em || require('./epg-manager');
+    const runner = pythonRunner || require('./python-runner');
     try {
-        if (!userConfig.m3u) {
-            console.log('M3U URL mancante');
+        const channelId = (typeof id === 'string' && id.includes('|')) ? id.split('|')[1] : (id || '');
+
+        await cacheManager.updateConfig(userConfig);
+
+        const isPseudo = PSEUDO_CHANNEL_IDS.includes(channelId);
+
+        if (!isPseudo && !userConfig.m3u) {
+            logger.log(cacheManager?.sessionKey ?? '_', 'M3U URL missing');
             return { streams: [] };
         }
 
-        // Aggiorna sempre la configurazione
-        await global.CacheManager.updateConfig(userConfig);
+        const NO_SIGNAL_URL = 'https://static.vecteezy.com/system/resources/previews/001/803/236/mp4/no-signal-bad-tv-free-video.mp4';
+        const PSEUDO_STREAM_HINTS = { notWebReady: false, bingeGroup: 'tv' };
+        const PSEUDO_MSG_SUFFIX = '\nGo back and reopen the catalog in Stremio to see changes.';
 
-        const channelId = id.split('|')[1];
+        function pseudoStream(success, title, url = NO_SIGNAL_URL) {
+            return {
+                streams: [{
+                    name: success ? 'Completed' : 'Error',
+                    title: (success ? '✅ ' : '❌ ') + title + PSEUDO_MSG_SUFFIX,
+                    url,
+                    behaviorHints: PSEUDO_STREAM_HINTS
+                }]
+            };
+        }
 
-        // Gestione canale speciale per la rigenerazione playlist
         if (channelId === 'rigeneraplaylistpython') {
-            console.log('\n=== Richiesta rigenerazione playlist Python ===');
-
-
-            // Esegui lo script Python
-            const PythonRunner = require('./python-runner');
-            const result = await PythonRunner.executeScript();
-
+            const result = await runner.executeScript();
             if (result) {
-                console.log('✓ Script Python eseguito con successo');
+                await cacheManager.rebuildCache(userConfig.m3u, userConfig);
+                return pseudoStream(true, 'Playlist regenerated successfully.');
+            }
+            logger.log(cacheManager?.sessionKey ?? '_', 'Python script execution error');
+            return pseudoStream(false, runner.lastError || 'Unknown error.');
+        }
 
-                // Ricostruisci la cache
-                console.log('Ricostruzione cache con il nuovo file generato...');
-                await global.CacheManager.rebuildCache(userConfig.m3u, userConfig);
+        if (channelId === 'refreshm3u') {
+            try {
+                if (!userConfig.m3u) return pseudoStream(false, 'M3U URL not configured.');
+                await cacheManager.rebuildCache(userConfig.m3u, userConfig);
+                return pseudoStream(true, 'M3U playlist refreshed.');
+            } catch (err) {
+                logger.error(cacheManager?.sessionKey ?? '_', 'Refresh M3U error:', err.message);
+                return pseudoStream(false, err.message || 'Unknown error.');
+            }
+        }
 
-                return {
-                    streams: [{
-                        name: 'Completato',
-                        title: '✅ Playlist rigenerata con successo!\n Riavvia stremio o torna indietro.',
-                        url: 'https://static.vecteezy.com/system/resources/previews/001/803/236/mp4/no-signal-bad-tv-free-video.mp4',
-                        behaviorHints: {
-                            notWebReady: false,
-                            bingeGroup: "tv"
-                        }
-                    }]
-                };
-            } else {
-                console.log('❌ Errore nell\'esecuzione dello script Python');
-                return {
-                    streams: [{
-                        name: 'Errore',
-                        title: `❌ Errore: ${PythonRunner.lastError || 'Errore sconosciuto'}`,
-                        url: 'https://static.vecteezy.com/system/resources/previews/001/803/236/mp4/no-signal-bad-tv-free-video.mp4',
-                        behaviorHints: {
-                            notWebReady: false,
-                            bingeGroup: "tv"
-                        }
-                    }]
-                };
+        if (channelId === 'refreshepg') {
+            try {
+                if (userConfig.epg_enabled !== 'true' || !userConfig.epg) return pseudoStream(false, 'EPG not enabled or EPG URL missing.');
+                await epgManager.startEPGUpdate(userConfig.epg);
+                return pseudoStream(true, 'EPG updated.');
+            } catch (err) {
+                logger.error(cacheManager?.sessionKey ?? '_', 'Refresh EPG error:', err.message);
+                return pseudoStream(false, err.message || 'Unknown error.');
             }
         }
 
         // Continua con il normale flusso per gli altri canali
-        const channel = global.CacheManager.getChannel(channelId);
+        const channel = cacheManager.getChannel(channelId);
 
         if (!channel) {
-            console.log('Canale non trovato:', channelId);
+            logger.log(cacheManager?.sessionKey ?? '_', 'Channel not found:', channelId);
             return { streams: [] };
         }
 
@@ -272,7 +341,7 @@ async function streamHandler({ id, config: userConfig }) {
 
 
         if (userConfig.resolver_enabled === 'true' && userConfig.resolver_script) {
-            console.log(`\n=== Utilizzo Resolver per ${channel.name} ===`);
+            logger.log(cacheManager?.sessionKey ?? '_', 'Using resolver for', channel.name);
 
             try {
                 const streamDetails = {
@@ -283,15 +352,15 @@ async function streamHandler({ id, config: userConfig }) {
                     }
                 };
 
-                const resolvedStreams = await ResolverStreamManager.getResolvedStreams(streamDetails, userConfig);
+                const resolvedStreams = await ResolverStreamManager.getResolvedStreams(streamDetails, userConfig, pythonResolver || require('./python-resolver'), cacheManager?.sessionKey);
 
                 if (resolvedStreams && resolvedStreams.length > 0) {
-                    console.log(`✓ Ottenuti ${resolvedStreams.length} flussi risolti`);
+                    logger.log(cacheManager?.sessionKey ?? '_', 'Got', resolvedStreams.length, 'resolved stream(s)');
 
                     if (userConfig.force_proxy === 'true') {
                         // Se force_proxy è attivo, mostriamo SOLO i flussi passati attraverso il proxy
                         if (userConfig.proxy && userConfig.proxy_pwd) {
-                            console.log('⚙️ Applicazione proxy ai flussi risolti (modalità forzata)...');
+                            logger.log(cacheManager?.sessionKey ?? '_', 'Applying proxy to resolved streams (force mode)...');
 
                             for (const resolvedStream of resolvedStreams) {
                                 const proxyStreamDetails = {
@@ -301,15 +370,15 @@ async function streamHandler({ id, config: userConfig }) {
                                     headers: resolvedStream.headers || {}
                                 };
 
-                                const proxiedResolvedStreams = await StreamProxyManager.getProxyStreams(proxyStreamDetails, userConfig);
+                                const proxiedResolvedStreams = await StreamProxyManager.getProxyStreams(proxyStreamDetails, userConfig, cacheManager?.sessionKey);
                                 streams.push(...proxiedResolvedStreams);
                             }
 
                             if (streams.length === 0) {
-                                console.log('⚠️ Nessun proxy valido per i flussi risolti e force_proxy è attivo, nessun flusso disponibile');
+                                logger.log(cacheManager?.sessionKey ?? '_', 'No valid proxy for resolved streams and force_proxy is on, no stream available');
                             }
                         } else {
-                            console.log('⚠️ Proxy forzato ma non configurato correttamente, uso i flussi risolti originali');
+                            logger.log(cacheManager?.sessionKey ?? '_', 'Force proxy on but not configured correctly, using original resolved streams');
                             streams = resolvedStreams;
                         }
                     } else {
@@ -319,7 +388,7 @@ async function streamHandler({ id, config: userConfig }) {
 
                         // 2. Aggiungiamo anche i flussi risolti tramite proxy, se il proxy è configurato
                         if (userConfig.proxy && userConfig.proxy_pwd) {
-                            console.log('⚙️ Aggiunta dei flussi proxy ai flussi risolti...');
+                            logger.log(cacheManager?.sessionKey ?? '_', 'Adding proxy streams to resolved streams...');
 
                             for (const resolvedStream of resolvedStreams) {
                                 const proxyStreamDetails = {
@@ -329,24 +398,22 @@ async function streamHandler({ id, config: userConfig }) {
                                     headers: resolvedStream.headers || {}
                                 };
 
-                                const proxiedResolvedStreams = await StreamProxyManager.getProxyStreams(proxyStreamDetails, userConfig);
+                                const proxiedResolvedStreams = await StreamProxyManager.getProxyStreams(proxyStreamDetails, userConfig, cacheManager?.sessionKey);
                                 streams.push(...proxiedResolvedStreams);
                             }
                         }
                     }
                 } else {
-                    console.log('⚠️ Nessun flusso risolto disponibile, utilizzo flussi standard');
+                    logger.log(cacheManager?.sessionKey ?? '_', 'No resolved stream available, using standard streams');
                     // Riprendi con la logica standard solo se il resolver fallisce
-                    streams = await processOriginalStreams(originalStreamDetails, channel, userConfig);
+                    streams = await processOriginalStreams(originalStreamDetails, channel, userConfig, cacheManager?.sessionKey);
                 }
             } catch (resolverError) {
-                console.error('❌ Errore durante la risoluzione dei flussi:', resolverError);
-                // In caso di errore del resolver, riprendi con la logica standard
-                streams = await processOriginalStreams(originalStreamDetails, channel, userConfig);
+                logger.error(cacheManager?.sessionKey ?? '_', 'Stream resolution error:', resolverError);
+                streams = await processOriginalStreams(originalStreamDetails, channel, userConfig, cacheManager?.sessionKey);
             }
         } else {
-            // Usa la logica standard se il resolver non è abilitato
-            streams = await processOriginalStreams(originalStreamDetails, channel, userConfig);
+            streams = await processOriginalStreams(originalStreamDetails, channel, userConfig, cacheManager?.sessionKey);
         }
 
         // Aggiungi i metadati a tutti gli stream
@@ -361,7 +428,7 @@ async function streamHandler({ id, config: userConfig }) {
             poster: channel.poster || fallbackLogo,
             background: channel.background || fallbackLogo,
             logo: channel.logo || fallbackLogo,
-            description: channel.description || `ID Canale: ${channel.streamInfo?.tvg?.id}`,
+            description: channel.description || `Channel ID: ${channel.streamInfo?.tvg?.id}`,
             genre: channel.genre,
             posterShape: channel.posterShape || 'square',
             releaseInfo: 'LIVE',
@@ -373,7 +440,7 @@ async function streamHandler({ id, config: userConfig }) {
         };
 
         if ((!meta.poster || !meta.background || !meta.logo) && channel.streamInfo?.tvg?.id) {
-            const epgIcon = EPGManager.getChannelIcon(channel.streamInfo.tvg.id);
+            const epgIcon = epgManager.getChannelIcon(channel.streamInfo.tvg.id);
             if (epgIcon) {
                 meta.poster = meta.poster || epgIcon;
                 meta.background = meta.background || epgIcon;
@@ -387,24 +454,21 @@ async function streamHandler({ id, config: userConfig }) {
 
         return { streams };
     } catch (error) {
-        console.error('Errore stream handler:', error);
+        logger.error(cacheManager?.sessionKey ?? '_', 'Stream handler error:', error);
         return { streams: [] };
     }
 }
 
-// Funzione ausiliaria per processare gli stream originali (codice esistente estratto)
-async function processOriginalStreams(originalStreamDetails, channel, userConfig) {
+async function processOriginalStreams(originalStreamDetails, channel, userConfig, sessionKey = null) {
     let streams = [];
-
     if (userConfig.force_proxy === 'true') {
         if (userConfig.proxy && userConfig.proxy_pwd) {
             for (const streamDetails of originalStreamDetails) {
-                const proxyStreams = await StreamProxyManager.getProxyStreams(streamDetails, userConfig);
+                const proxyStreams = await StreamProxyManager.getProxyStreams(streamDetails, userConfig, sessionKey);
                 streams.push(...proxyStreams);
             }
         }
     } else {
-        // Aggiungi prima gli stream originali
         for (const streamDetails of originalStreamDetails) {
             const language = getLanguageFromConfig(userConfig);
             const streamMeta = {
@@ -419,15 +483,12 @@ async function processOriginalStreams(originalStreamDetails, channel, userConfig
                 }
             };
             streams.push(streamMeta);
-
-            // Aggiungi anche stream proxy se configurato
             if (userConfig.proxy && userConfig.proxy_pwd) {
-                const proxyStreams = await StreamProxyManager.getProxyStreams(streamDetails, userConfig);
+                const proxyStreams = await StreamProxyManager.getProxyStreams(streamDetails, userConfig, sessionKey);
                 streams.push(...proxyStreams);
             }
         }
     }
-
     return streams;
 }
 

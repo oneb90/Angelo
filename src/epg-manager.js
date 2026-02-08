@@ -7,12 +7,21 @@ const cron = require('node-cron');
 const initSqlJs = require('sql.js');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+const logger = require('./logger');
+
+function safeEpgDbName(sessionKey) {
+    if (!sessionKey || sessionKey === '_default') return 'epg.db';
+    const hash = crypto.createHash('sha256').update(String(sessionKey)).digest('hex').slice(0, 16);
+    return `epg_${hash}.db`;
+}
 
 class EPGManager {
-    constructor() {
+    constructor(sessionKey = null) {
+        this.sessionKey = sessionKey;
         this.epgData = null;
         this.db = null;
-        this.dbPath = path.join(__dirname, 'data', 'epg.db');
+        this.dbPath = path.join(__dirname, '..', 'data', safeEpgDbName(sessionKey));
         this.lastUpdate = null;
         this.isUpdating = false;
         this.CHUNK_SIZE = 5000;
@@ -20,14 +29,16 @@ class EPGManager {
         this.cronJob = null;
         this.cleanupJob = null;
         this.validateAndSetTimezone();
-        this.initializeDatabase();
+        if (!sessionKey) {
+            this.initializeDatabase();
+        }
         this.schedulePeriodicCleanup();
     }
 
     async initializeDatabase() {
         try {
             // Crea directory data se non esiste
-            const dataDir = path.join(__dirname, 'data');
+            const dataDir = path.join(__dirname, '..', 'data');
             if (!fs.existsSync(dataDir)) {
                 fs.mkdirSync(dataDir, { recursive: true });
             }
@@ -39,10 +50,8 @@ class EPGManager {
             if (fs.existsSync(this.dbPath)) {
                 const buffer = fs.readFileSync(this.dbPath);
                 this.db = new SQL.Database(buffer);
-                console.log('✓ Database EPG caricato da disco');
             } else {
                 this.db = new SQL.Database();
-                console.log('✓ Nuovo database EPG creato');
             }
 
             // Crea schema
@@ -73,9 +82,8 @@ class EPGManager {
                 );
             `);
 
-            console.log('✓ Schema database EPG inizializzato');
-        } catch (error) {
-            console.error('❌ Errore inizializzazione database:', error);
+            } catch (error) {
+            logger.error(this.sessionKey, 'EPG DB init error:', error.message);
         }
     }
 
@@ -85,12 +93,29 @@ class EPGManager {
             const buffer = Buffer.from(data);
             fs.writeFileSync(this.dbPath, buffer);
         } catch (error) {
-            console.error('❌ Errore salvataggio database:', error);
+            logger.error(this.sessionKey, 'EPG DB save error:', error.message);
         }
     }
 
     normalizeId(id) {
-        return id?.toLowerCase().replace(/[^\w.]/g, '').trim() || '';
+        const beforeAt = (typeof id === 'string' && id.includes('@')) ? id.split('@')[0] : id;
+        return beforeAt?.toLowerCase().replace(/[^\w.]/g, '').trim() || '';
+    }
+
+    /**
+     * Restituisce gli id da provare per la lookup EPG: prima l'id normalizzato (es. canale5.it),
+     * poi l'id senza suffisso dopo l'ultimo punto (es. canale5) per match con EPG XML (es. "Canale 5" -> canale5).
+     */
+    getLookupIds(channelId) {
+        const normalized = this.normalizeId(channelId);
+        if (!normalized) return [];
+        const ids = [normalized];
+        const lastDot = normalized.lastIndexOf('.');
+        if (lastDot > 0) {
+            const withoutSuffix = normalized.slice(0, lastDot);
+            if (withoutSuffix && !ids.includes(withoutSuffix)) ids.push(withoutSuffix);
+        }
+        return ids;
     }
 
     validateAndSetTimezone() {
@@ -134,7 +159,7 @@ class EPGManager {
             const date = new Date(isoString);
             return isNaN(date.getTime()) ? null : date;
         } catch (error) {
-            console.error('Errore nel parsing della data EPG:', error);
+            logger.error(this.sessionKey, 'EPG date parse error:', error.message);
             return null;
         }
     }
@@ -142,41 +167,26 @@ class EPGManager {
     async initializeEPG(url) {
         // Se l'URL è lo stesso e il database ha dati, skip
         if (this.lastEpgUrl === url && this.isEPGAvailable()) {
-            console.log('EPG già inizializzato e valido, skip...');
             return;
         }
-
-        console.log('\\n=== Inizializzazione EPG ===');
-        console.log('URL EPG:', url);
         this.lastEpgUrl = url;
         await this.startEPGUpdate(url);
-
         if (!this.cronJob) {
-            console.log('Schedulazione aggiornamento EPG giornaliero alle 3:00');
             this.cronJob = cron.schedule('0 3 * * *', () => {
-                console.log('Esecuzione aggiornamento EPG programmato');
                 this.startEPGUpdate(this.lastEpgUrl);
             });
+            logger.log(this.sessionKey, 'EPG daily update scheduled (03:00)');
         }
-        console.log('=== Inizializzazione EPG completata ===\\n');
+        logger.log(this.sessionKey, 'EPG init done, URL:', url);
     }
 
     cleanupOldPrograms() {
         const oneHourAgo = Date.now() - 60 * 60 * 1000;
-
-        console.log('\\n=== Pulizia Programmi EPG Obsoleti ===');
-
         const result = this.db.run('DELETE FROM programs WHERE stop_time < ?', [oneHourAgo]);
-
-        console.log(`✓ Rimossi ${result.changes || 0} programmi obsoleti`);
-
-        // Salva database dopo pulizia
         this.saveDatabase();
-
-        const channelsCount = this.db.exec('SELECT COUNT(DISTINCT channel_id) as count FROM programs')[0]?.values[0]?.[0] || 0;
-        console.log(`✓ Canali rimanenti con EPG: ${channelsCount}`);
-        console.log('=== Pulizia Completata ===\\n');
-
+        if (result.changes > 0) {
+            logger.log(this.sessionKey, 'EPG cleanup: removed', result.changes, 'old program(s)');
+        }
         return result.changes || 0;
     }
 
@@ -186,18 +196,11 @@ class EPGManager {
         }
 
         this.cleanupJob = cron.schedule('0 */6 * * *', () => {
-            console.log('\\n⏰ Esecuzione pulizia periodica EPG programmata...');
-            const removed = this.cleanupOldPrograms();
-            if (removed > 0) {
-                console.log(`✓ Memoria liberata: ~${(removed * 0.5).toFixed(1)} KB stimati`);
-            }
+            this.cleanupOldPrograms();
         });
-
-        console.log('✓ Pulizia periodica EPG schedulata (ogni 6 ore)');
     }
 
     async downloadAndProcessEPG(epgUrl) {
-        console.log('\\nDownload EPG da:', epgUrl.trim());
         try {
             const response = await axios.get(epgUrl.trim(), {
                 responseType: 'arraybuffer',
@@ -221,31 +224,24 @@ class EPGManager {
                 }
             }
 
-            console.log('Inizio parsing XML...');
             const xmlData = await parseStringPromise(xmlString);
-            console.log('Parsing XML completato');
-
             if (!xmlData || !xmlData.tv) {
                 throw new Error('Struttura XML EPG non valida');
             }
 
             await this.processEPGInChunks(xmlData);
         } catch (error) {
-            console.error(`❌ Errore EPG: ${error.message}`);
+            const msg = (error && error.message) || (typeof error === 'string' ? error : String(error)) || 'Unknown error';
+            logger.error(this.sessionKey, 'EPG error:', msg);
         }
     }
 
     async processEPGInChunks(data) {
-        console.log('Inizio processamento EPG...');
-
         if (!data.tv) {
-            console.error('❌ Errore: Nessun oggetto tv trovato nel file EPG');
+            logger.error(this.sessionKey, 'EPG: no tv object in file');
             return;
         }
-
-        // Processa icone
         if (data.tv && data.tv.channel) {
-            console.log(`Trovati ${data.tv.channel.length} canali nel file EPG`);
 
             const stmt = this.db.prepare('INSERT OR REPLACE INTO channel_icons (channel_id, icon_url) VALUES (?, ?)');
 
@@ -260,14 +256,11 @@ class EPGManager {
         }
 
         if (!data.tv || !data.tv.programme) {
-            console.error('❌ Errore: Nessun programma trovato nel file EPG');
+            logger.error(this.sessionKey, 'EPG: no programme in file');
             return;
         }
-
         const programs = data.tv.programme;
         let totalProcessed = 0;
-
-        console.log(`\\nProcessamento di ${programs.length} voci EPG in blocchi di ${this.CHUNK_SIZE}`);
 
         // Definisci limiti temporali
         const now = new Date();
@@ -305,9 +298,15 @@ class EPGManager {
                     continue;
                 }
 
-                const title = program.title?.[0]?._ || program.title?.[0]?.$?.text || program.title?.[0] || 'Nessun Titolo';
-                const description = program.desc?.[0]?._ || program.desc?.[0]?.$?.text || program.desc?.[0] || '';
-                const category = program.category?.[0]?._ || program.category?.[0]?.$?.text || program.category?.[0] || '';
+                let title = program.title?.[0]?._ ?? program.title?.[0]?.$?.text ?? program.title?.[0];
+                let description = program.desc?.[0]?._ ?? program.desc?.[0]?.$?.text ?? program.desc?.[0];
+                let category = program.category?.[0]?._ ?? program.category?.[0]?.$?.text ?? program.category?.[0];
+                title = (title != null && typeof title === 'object') ? (title.text || title._ || String(title)) : (title ?? 'Nessun Titolo');
+                description = (description != null && typeof description === 'object') ? (description.text || description._ || String(description)) : (description ?? '');
+                category = (category != null && typeof category === 'object') ? (category.text || category._ || String(category)) : (category ?? '');
+                title = String(title);
+                description = String(description);
+                category = String(category);
 
                 stmt.run([
                     channelId,
@@ -319,22 +318,10 @@ class EPGManager {
                 ]);
                 totalProcessed++;
             }
-
-            if ((i + this.CHUNK_SIZE) % 50000 === 0) {
-                console.log(`Progresso: processate ${i + this.CHUNK_SIZE} voci...`);
-            }
         }
-
         stmt.free();
-
-        // Salva database
         this.saveDatabase();
-
-        console.log('\\nRiepilogo Processamento EPG:');
-        console.log(`✓ Totale voci processate: ${totalProcessed}`);
-        console.log(`✓ Programmi vecchi saltati: ${skippedOld}`);
-        console.log(`✓ Programmi futuri saltati (oltre 7 giorni): ${skippedFuture}`);
-        console.log(`✓ Risparmio memoria stimato: ~${((skippedOld + skippedFuture) * 0.5).toFixed(1)} KB`);
+        logger.log(this.sessionKey, 'EPG processed:', totalProcessed, 'programs (skipped old:', skippedOld, ', future:', skippedFuture, ')');
     }
 
     async readExternalFile(url) {
@@ -347,82 +334,46 @@ class EPGManager {
         }
 
         try {
-            console.log('Tentativo lettura file:', url);
-
-            if (url.endsWith('.gz')) {
-                console.log('File gzipped EPG trovato');
-                return [url];
-            }
-
+            if (url.endsWith('.gz')) return [url];
             const response = await axios.get(url.trim());
             const content = response.data;
-
             if (typeof content === 'string' &&
                 (content.includes('<?xml') || content.includes('<tv'))) {
-                console.log('File EPG trovato direttamente');
                 return [url];
             }
-
             const urls = content.split('\n')
                 .filter(line => line.trim() !== '' && line.startsWith('http'));
-
-            if (urls.length > 0) {
-                console.log('Lista URLs trovata:', urls);
-                return urls;
-            }
-
-            console.log('Nessun URL trovato, uso URL originale');
+            if (urls.length > 0) return urls;
             return [url];
-
         } catch (error) {
-            console.error('Errore nella lettura del file:', error);
+            logger.error(this.sessionKey, 'EPG read file error:', error.message);
             return [url];
         }
     }
 
     async startEPGUpdate(url) {
         if (this.isUpdating) {
-            console.log('⚠️  Aggiornamento EPG già in corso, skip...');
+            logger.log(this.sessionKey, 'EPG update already in progress, skip');
             return;
         }
-
-        console.log('\\n=== Inizio Aggiornamento EPG ===');
         const startTime = Date.now();
-
         try {
             this.isUpdating = true;
-            console.log('Inizio lettura URLs EPG...');
-
             const epgUrls = await this.readExternalFile(url);
-            console.log('URLs trovati:', epgUrls);
 
             // Pulisci database
             this.db.run('DELETE FROM programs');
             this.db.run('DELETE FROM channel_icons');
 
             for (const epgUrl of epgUrls) {
-                console.log('\\nProcesso URL EPG:', epgUrl);
                 await this.downloadAndProcessEPG(epgUrl);
             }
-
             const duration = ((Date.now() - startTime) / 1000).toFixed(1);
-
             const channelsCount = this.db.exec('SELECT COUNT(DISTINCT channel_id) as count FROM programs')[0]?.values[0]?.[0] || 0;
-            const iconsCount = this.db.exec('SELECT COUNT(*) as count FROM channel_icons')[0]?.values[0]?.[0] || 0;
-
-            console.log(`\\n✓ Aggiornamento EPG completato in ${duration} secondi`);
-            console.log(`✓ Totale canali con dati EPG: ${channelsCount}`);
-            console.log(`✓ Totale canali con icone: ${iconsCount}`);
-
-            // Esegui pulizia dopo l'aggiornamento
-            console.log('\\n🧹 Esecuzione pulizia post-aggiornamento...');
             this.cleanupOldPrograms();
-
-            console.log('=== Aggiornamento EPG Completato ===\\n');
-
+            logger.log(this.sessionKey, 'EPG update done in', duration, 's, channels:', channelsCount);
         } catch (error) {
-            console.error('❌ Errore dettagliato durante l\'aggiornamento EPG:', error);
-            console.error('Stack:', error.stack);
+            logger.error(this.sessionKey, 'EPG update error:', error.message);
         } finally {
             this.isUpdating = false;
             this.lastUpdate = Date.now();
@@ -431,29 +382,31 @@ class EPGManager {
 
     getCurrentProgram(channelId) {
         if (!channelId || !this.db) return null;
-        const normalizedId = this.normalizeId(channelId);
         const now = Date.now();
+        const ids = this.getLookupIds(channelId);
 
-        try {
-            const result = this.db.exec(`
-                SELECT title, description, category, start_time, stop_time
-                FROM programs
-                WHERE channel_id = ? AND start_time <= ? AND stop_time >= ?
-                LIMIT 1
-            `, [normalizedId, now, now]);
+        for (const normalizedId of ids) {
+            try {
+                const result = this.db.exec(`
+                    SELECT title, description, category, start_time, stop_time
+                    FROM programs
+                    WHERE channel_id = ? AND start_time <= ? AND stop_time >= ?
+                    LIMIT 1
+                `, [normalizedId, now, now]);
 
-            if (result.length > 0 && result[0].values.length > 0) {
-                const row = result[0].values[0];
-                return {
-                    title: row[0],
-                    description: row[1],
-                    category: row[2],
-                    start: this.formatDateIT(new Date(row[3])),
-                    stop: this.formatDateIT(new Date(row[4]))
-                };
+                if (result.length > 0 && result[0].values.length > 0) {
+                    const row = result[0].values[0];
+                    return {
+                        title: row[0],
+                        description: row[1],
+                        category: row[2],
+                        start: this.formatDateIT(new Date(row[3])),
+                        stop: this.formatDateIT(new Date(row[4]))
+                    };
+                }
+            } catch (error) {
+                logger.error(this.sessionKey, 'getCurrentProgram error:', error.message);
             }
-        } catch (error) {
-            console.error('Errore getCurrentProgram:', error);
         }
 
         return null;
@@ -461,29 +414,31 @@ class EPGManager {
 
     getUpcomingPrograms(channelId) {
         if (!channelId || !this.db) return [];
-        const normalizedId = this.normalizeId(channelId);
         const now = Date.now();
+        const ids = this.getLookupIds(channelId);
 
-        try {
-            const result = this.db.exec(`
-                SELECT title, description, category, start_time, stop_time
-                FROM programs
-                WHERE channel_id = ? AND start_time >= ?
-                ORDER BY start_time ASC
-                LIMIT 2
-            `, [normalizedId, now]);
+        for (const normalizedId of ids) {
+            try {
+                const result = this.db.exec(`
+                    SELECT title, description, category, start_time, stop_time
+                    FROM programs
+                    WHERE channel_id = ? AND start_time >= ?
+                    ORDER BY start_time ASC
+                    LIMIT 2
+                `, [normalizedId, now]);
 
-            if (result.length > 0) {
-                return result[0].values.map(row => ({
-                    title: row[0],
-                    description: row[1],
-                    category: row[2],
-                    start: this.formatDateIT(new Date(row[3])),
-                    stop: this.formatDateIT(new Date(row[4]))
-                }));
+                if (result.length > 0 && result[0].values.length > 0) {
+                    return result[0].values.map(row => ({
+                        title: row[0],
+                        description: row[1],
+                        category: row[2],
+                        start: this.formatDateIT(new Date(row[3])),
+                        stop: this.formatDateIT(new Date(row[4]))
+                    }));
+                }
+            } catch (error) {
+                logger.error(this.sessionKey, 'getUpcomingPrograms error:', error.message);
             }
-        } catch (error) {
-            console.error('Errore getUpcomingPrograms:', error);
         }
 
         return [];
@@ -491,18 +446,20 @@ class EPGManager {
 
     getChannelIcon(channelId) {
         if (!channelId || !this.db) return null;
-        const normalizedId = this.normalizeId(channelId);
+        const ids = this.getLookupIds(channelId);
 
-        try {
-            const result = this.db.exec(`
-                SELECT icon_url FROM channel_icons WHERE channel_id = ?
-            `, [normalizedId]);
+        for (const normalizedId of ids) {
+            try {
+                const result = this.db.exec(`
+                    SELECT icon_url FROM channel_icons WHERE channel_id = ?
+                `, [normalizedId]);
 
-            if (result.length > 0 && result[0].values.length > 0) {
-                return result[0].values[0][0];
+                if (result.length > 0 && result[0].values.length > 0) {
+                    return result[0].values[0][0];
+                }
+            } catch (error) {
+                logger.error(this.sessionKey, 'getChannelIcon error:', error.message);
             }
-        } catch (error) {
-            console.error('Errore getChannelIcon:', error);
         }
 
         return null;
@@ -540,7 +497,7 @@ class EPGManager {
                 const programsResult = this.db.exec('SELECT COUNT(*) as count FROM programs');
                 programsCount = programsResult[0]?.values[0]?.[0] || 0;
             } catch (error) {
-                console.error('Errore getStatus:', error);
+                logger.error(this.sessionKey, 'getStatus error:', error.message);
             }
         }
 
@@ -574,17 +531,57 @@ class EPGManager {
             });
 
             if (missingEPG.length > 0) {
-                console.log('\\n=== Canali M3U senza EPG ===');
-                missingEPG.forEach(ch => {
-                    console.log(`${ch.streamInfo?.tvg?.id}=`);
-                });
-                console.log(`✓ Totale canali M3U senza EPG: ${missingEPG.length}`);
-                console.log('=============================\\n');
+                logger.log(this.sessionKey, 'M3U channels without EPG:', missingEPG.length);
             }
         } catch (error) {
-            console.error('Errore checkMissingEPG:', error);
+            logger.error(this.sessionKey, 'checkMissingEPG error:', error.message);
         }
     }
 }
 
-module.exports = new EPGManager();
+const registry = new Map();
+const defaultInstance = new EPGManager();
+
+async function getEPGManager(sessionKey) {
+    const key = (sessionKey && String(sessionKey).trim()) ? String(sessionKey).trim() : '_default';
+    if (key === '_default') return defaultInstance;
+    if (!registry.has(key)) {
+        const instance = new EPGManager(key);
+        await instance.initializeDatabase();
+        registry.set(key, instance);
+    }
+    return registry.get(key);
+}
+
+/**
+ * Rimuove una sessione EPG (cron, file DB). Non usare per _default.
+ * @param {string} sessionKey
+ */
+function removeEPGSession(sessionKey) {
+    const key = (sessionKey && String(sessionKey).trim()) ? String(sessionKey).trim() : '_default';
+    if (key === '_default') return;
+    const instance = registry.get(key);
+    if (!instance) return;
+    try {
+        if (instance.cronJob) {
+            instance.cronJob.stop();
+            instance.cronJob = null;
+        }
+        if (instance.cleanupJob) {
+            instance.cleanupJob.stop();
+            instance.cleanupJob = null;
+        }
+        if (instance.dbPath && fs.existsSync(instance.dbPath)) {
+            fs.unlinkSync(instance.dbPath);
+            logger.log(key, 'EPG session removed:', instance.dbPath);
+        }
+    } catch (e) {
+        logger.error(key, 'EPG session removal error:', e.message);
+    }
+    instance.db = null;
+    registry.delete(key);
+}
+
+module.exports = defaultInstance;
+module.exports.getEPGManager = getEPGManager;
+module.exports.removeEPGSession = removeEPGSession;

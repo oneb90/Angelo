@@ -1,6 +1,7 @@
 const axios = require('axios');
 const { URL } = require('url');
 const config = require('./config');
+const logger = require('./logger');
 
 function getLanguageFromConfig(userConfig) {
     return userConfig.language || config.defaultLanguage || 'Italiano';
@@ -32,7 +33,8 @@ class StreamProxyManager {
         return new Promise(resolve => setTimeout(resolve, ms));
     }
 
-    async checkProxyHealth(proxyUrl, headers = {}) {
+    async checkProxyHealth(proxyUrl, headers = {}, sessionKey = null) {
+        const sk = sessionKey || '_';
         const cacheKey = proxyUrl;
         const now = Date.now();
         const lastCheckTime = this.lastCheck.get(cacheKey);
@@ -90,31 +92,22 @@ class StreamProxyManager {
         this.lastCheck.set(cacheKey, now);
         
         if (!isHealthy) {
-            // Log dettagliato in caso di fallimento di tutti i tentativi
-            console.error('❌ ERRORE PROXY HEALTH CHECK - Tutti i tentativi falliti:');
-            
+            logger.error(sk, 'Proxy health check failed after all attempts');
             if (lastError) {
-                console.error(`  Ultimo errore: ${lastError.message}`);
-                console.error(`  Codice errore: ${lastError.code || 'N/A'}`);
-                
-                // Log dello stack trace per debug avanzato
+                logger.error(sk, 'Last error:', lastError.message, 'Error code:', lastError.code || 'N/A');
             } else {
-                console.error(`  Nessun errore specifico rilevato, controllo fallito senza eccezioni`);
+                logger.error(sk, 'No specific error, check failed without exceptions');
             }
-            
-            // Log degli headers usati nella richiesta
-            console.error('============================================================');
         } else if (attempts > 1) {
-            // Log di successo dopo tentativi multipli
-            console.log(`✅ Proxy verificato con successo dopo ${attempts} tentativi`);
+            logger.log(sk, 'Proxy verified successfully after', attempts, 'attempt(s)');
         }
-        
         return isHealthy;
     }
 
-    async buildProxyUrl(streamUrl, headers = {}, userConfig = {}) {
+    async buildProxyUrl(streamUrl, headers = {}, userConfig = {}, sessionKey = null) {
+        const sk = sessionKey || '_';
         if (!userConfig.proxy || !userConfig.proxy_pwd || !streamUrl || typeof streamUrl !== 'string') {
-            console.warn('⚠️ buildProxyUrl: Parametri mancanti o non validi');
+            logger.warn(sk, 'buildProxyUrl: Missing or invalid parameters');
             return null;
         }
     
@@ -165,8 +158,8 @@ class StreamProxyManager {
         return proxyUrl;
     }
 
-    async getProxyStreams(input, userConfig = {}) {
-        // Blocca solo gli URL che sono già proxy
+    async getProxyStreams(input, userConfig = {}, sessionKey = null) {
+        const sk = sessionKey || '_';
         if (input.url.includes(userConfig.proxy)) {
             return [];
         }
@@ -180,7 +173,7 @@ class StreamProxyManager {
         const shouldExclude = excludedDomains.some(domain => input.url.includes(domain));
         
         if (shouldExclude) {
-            console.log(`⚠️ Dominio escluso dal proxy: ${input.url}`);
+            logger.log(sk, 'Domain excluded from proxy:', input.url);
             const language = getLanguageFromConfig(userConfig);
             return [{
                 name: input.name,
@@ -195,9 +188,8 @@ class StreamProxyManager {
             }];
         }
         
-        // Se il proxy non è configurato, interrompe l'elaborazione
         if (!userConfig.proxy || !userConfig.proxy_pwd) {
-            console.log('⚠️ Proxy non configurato per:', input.name);
+            logger.log(sk, 'Proxy not configured for:', input.name);
             return [];
         }
     
@@ -211,23 +203,15 @@ class StreamProxyManager {
                 headers['User-Agent'] = config.defaultUserAgent;
             }
     
-            // Costruisce l'URL del proxy (questa chiamata già normalizza l'URL rimuovendo lo slash finale)
-            let proxyUrl = await this.buildProxyUrl(input.url, headers, userConfig);
-    
-            // Verifica se il proxy è attivo e funzionante
-            let isHealthy = await this.checkProxyHealth(proxyUrl, headers);
-            
-            // Se il proxy non è sano, prova la versione con slash finale
+            let proxyUrl = await this.buildProxyUrl(input.url, headers, userConfig, sessionKey);
+            let isHealthy = await this.checkProxyHealth(proxyUrl, headers, sessionKey);
             if (!isHealthy) {
-                console.log(`⚠️ Proxy non valido, provo versione con slash finale per: ${input.url}`);
-                
-                // Aggiungi lo slash finale e riprova
+                logger.log(sk, 'Proxy invalid, trying trailing slash version for:', input.url);
                 const urlWithSlash = input.url.endsWith('/') ? input.url : input.url + '/';
-                const proxyUrlWithSlash = await this.buildProxyUrl(urlWithSlash, headers, userConfig);
-                const isHealthyWithSlash = await this.checkProxyHealth(proxyUrlWithSlash, headers);
-                
+                const proxyUrlWithSlash = await this.buildProxyUrl(urlWithSlash, headers, userConfig, sessionKey);
+                const isHealthyWithSlash = await this.checkProxyHealth(proxyUrlWithSlash, headers, sessionKey);
                 if (isHealthyWithSlash) {
-                    console.log(`✅ Versione con slash finale funzionante per: ${input.url}`);
+                    logger.log(sk, 'Trailing slash version working for:', input.url);
                     proxyUrl = proxyUrlWithSlash;
                     isHealthy = true;
                 }
@@ -257,7 +241,7 @@ class StreamProxyManager {
                     }
                 });
             } else {
-                console.log(`⚠️ Proxy non valido per: ${input.url}, mantengo stream originale`);
+                logger.log(sk, 'Proxy invalid for:', input.url, ', keeping original stream');
                 
                 // Aggiungi lo stream originale se il proxy non funziona
                 if (userConfig.force_proxy === 'true') {
@@ -276,9 +260,7 @@ class StreamProxyManager {
             }
         
         } catch (error) {
-            console.error('❌ Errore durante l\'elaborazione del proxy:', error.message);
-            
-            // In caso di errore, aggiungi lo stream originale SOLO se force_proxy è attivo
+            logger.error(sk, 'Proxy processing error:', error.message);
             if (userConfig.force_proxy === 'true') {
                 const language = getLanguageFromConfig(userConfig);
                 streams.push({

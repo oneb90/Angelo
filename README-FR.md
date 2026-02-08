@@ -24,7 +24,26 @@ Un café ☕ ou une bière 🍺 sont un geste de reconnaissance très apprécié
 
 ## 🔄 Changelog de OMG Premium TV
 
-### 🚀 Version 6.0.0 (Actuelle)
+### 🚀 Version 7.0.0 (Actuelle)
+
+### ✨ Nouvelles fonctionnalités
+- **🔒 Protection par mot de passe de la home** : Option dans l’interface web pour protéger l’accès à la page de configuration par un mot de passe. Si activée, toute personne ouvrant la home (ou le lien « Configurer » depuis Stremio) doit saisir le mot de passe ; l’utilisation de l’addon depuis Stremio ne demande pas de mot de passe.
+- **🔄 Sessions et cache isolé** : Le cache est isolé automatiquement par configuration (même config = même cache). L'EPG, le Résolveur Python et le Générateur de playlist sont aussi par session. Plusieurs utilisateurs ou configurations différentes peuvent utiliser le serveur en même temps sans s’écraser mutuellement.
+
+- **🆔 ID de session** : L'**ID de session** (dérivé de la configuration) est affiché sur la page home/config lorsque vous générez une configuration. L'ID est inclus dans la sauvegarde (export) et mis à jour à la restauration (import).
+- **⏰ Expiration des sessions (24h)** : Si une session ne reçoit aucune requête pendant **24 heures**, elle expire automatiquement : tout le cache de cette session (cache M3U, EPG, résolveur, générateur) est supprimé. À la prochaine requête avec la même config, la session est recréée et les données sont rechargées depuis les URL.
+
+### 🔧 Améliorations
+- **🌐 Interface en 4 langues** : L'interface web est disponible en italien, anglais, espagnol et français ; vous pouvez changer de langue depuis la barre en haut à droite.
+- **📋 Listes prédéfinies (optionnel)** : Sur la page de configuration, une section permet d'ajouter en un clic les playlist et EPG prédéfinis iptv-org et iptv-epg.org par pays (champs M3U et EPG).
+- **⚙️ Section Paramètres** : Le catalogue a un filtre genre **⚙️** qui regroupe les canaux utilitaires : **Refresh M3U playlist**, **Refresh EPG**, **Rigenera Playlist Python**. Descriptions et messages en anglais.
+- **🔄 Pseudo-canaux** : Ouvrir un canal de la section ⚙️ exécute l’action (rechargement playlist, mise à jour EPG ou régénération Python) et affiche un message de résultat ; pas de flux vidéo réel.
+- **♻️ Cache au redémarrage** : Si le cache est vide (ex. après redémarrage Docker), la playlist et l’EPG sont reconstruits à la première requête quand les URL M3U/EPG sont configurées.
+- **📺 EPG et ID canaux** : Meilleure correspondance EPG pour les canaux avec suffixe (ex. `canale5.it` / `canale5`).
+- **🔒 Interface protection home** : Quand la protection est active, la case et le bouton « Modifica password » (Modifier le mot de passe) sont visibles ; les champs mot de passe et confirmation n’apparaissent qu’en cliquant dessus.
+- **🔗 Retour après connexion** : Après avoir saisi le mot de passe sur la page d’accès, vous êtes renvoyé à la page d’origine (ex. page de configuration avec URL encodée).
+
+### 🚀 Version 6.0.0
 
 ### 📢 Changement de nom
 - **📜 OMG+ devient OMG Premium** : Nouveau nom pour différencier et valoriser toutes les nouvelles fonctions disponibles. OMG TV reste comme version de base avec des chaînes prédéfinies. Elle ne sera plus mise à jour.
@@ -116,6 +135,11 @@ Cliquez sur une chaîne pour voir :
 
 ## 🛠️ Paramètres avancés
 
+### 🔒 Protéger l'accès à la home
+- **Activer la protection par mot de passe** ✅ : Si activée, la prochaine visite sur la page de configuration (home ou lien « Configurer » depuis Stremio) demandera le mot de passe. L’addon dans Stremio continue de fonctionner sans mot de passe.
+- **Modifier le mot de passe** : Quand la protection est active, vous voyez « Protezione attiva » et le bouton **Modifica password** ; en cliquant, les champs pour changer le mot de passe s’affichent. Pour désactiver, décochez et enregistrez (sans saisir de mot de passe).
+- Le mot de passe se définit et se modifie uniquement depuis l’interface web ; il n’est pas demandé pour regarder les chaînes dans Stremio.
+
 ### 🌐 Configuration du proxy
 - **URL Proxy** 🔗 : URL du proxy pour les streams (compatible uniquement avec [MediaFlow Proxy](https://github.com/mhdzumair/mediaflow-proxy))
 - **Mot de passe Proxy** 🔑 : Mot de passe pour l'authentification du proxy
@@ -151,12 +175,12 @@ Cliquez sur une chaîne pour voir :
 
 ### 📤 Sauvegarde de la configuration
 1. Cliquez sur **SAUVEGARDER CONFIGURATION** 💾
-2. Un fichier JSON sera téléchargé avec tous vos paramètres
+2. Un fichier JSON sera téléchargé avec tous vos paramètres (y compris l'**ID de session** de la config actuelle)
 
 ### 📥 Restauration de la configuration
 1. Cliquez sur **RESTAURER CONFIGURATION** 📤
 2. Sélectionnez le fichier JSON précédemment sauvegardé
-3. Attendez la fin de la restauration
+3. Attendez la fin de la restauration (l'ID de session affiché sur la page se met à jour selon la config restaurée)
 
 ## ❓ Résolution des problèmes
 
@@ -185,8 +209,8 @@ Cliquez sur une chaîne pour voir :
 - Pour éviter un doublon, supprimez l'addon sur Stremio
 - Retournez à la page de configuration et cliquez sur **Installer sur Stremio**
 
-### 🔧 Régénération de la playlist
-- Si vous avez configuré un script Python, utilisez le canal spécial **Régénérer Playlist Python** pour recréer la playlist
+### 🔧 Régénération de la playlist et mises à jour rapides
+- Dans la section **⚙️** (filtre par genre du catalogue) : **Refresh M3U playlist** (recharger depuis la source), **Refresh EPG** (mettre à jour la guide), **Rigenera Playlist Python** (exécuter le script et recharger). Ouvrez le canal et suivez le message à l’écran.
 
 ## 📋 Résumé des fonctionnalités principales
 
@@ -198,6 +222,10 @@ Cliquez sur une chaîne pour voir :
 - ✅ Génération de playlists personnalisées
 - ✅ Mises à jour automatiques
 - ✅ Sauvegarde et restauration de la configuration
+- ✅ Protection par mot de passe de la page de configuration (optionnelle)
+- ✅ Cache isolée par configuration (accès simultanés)
+- ✅ ID de session visible et inclus dans l'export/import
+- ✅ Expiration automatique des sessions inactives (24h) pour libérer de l'espace
 - Spécifications techniques dans le [wiki](https://github.com/mccoy88f/OMG-Premium-TV/wiki/Tech-Spec-%E2%80%90-Specifiche-Teniche)
 
 ## 📱 Compatibilité
